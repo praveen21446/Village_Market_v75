@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+/uploads/*
+!/uploads/.gitkeep
+/database/*.db
+/database/*.sqlite
+/database/*.sqlite3
+.vscode/
+.idea/
+backups/*.dump

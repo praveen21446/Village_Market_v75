@@ -1,0 +1,503 @@
+from pathlib import Path
+import asyncio,base64,hashlib,hmac,httpx,json,os,secrets,shutil,smtplib
+from email.message import EmailMessage
+from datetime import datetime,timedelta
+from fastapi import Depends,FastAPI,File,Form,HTTPException,UploadFile,WebSocket,WebSocketDisconnect
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+from sqlalchemy.orm import Session
+from .auth import admin_credentials,current_user,require_role,send_otp,verify_otp
+from .database import SessionLocal,get_db
+from .models import AdminAccount,Booking,Crop,Notification,Review,SavedAddress,SupportMessage,SupportTicket,User
+from .schemas import AddressSave,AdminCreate,AdminLogin,Approval,BookingCreate,CartCheckout,CropRemoval,Decision,NotificationMark,ReviewCreate,SendOtp,StatusUpdate,StockUpdate,VerifyOtp,DeliveryOtpVerify,SupportMessageCreate,SupportStatusUpdate,AdminCropEdit,SupportTicketCreate
+ROOT=Path(__file__).resolve().parents[1];UPLOADS=ROOT/'uploads';UPLOADS.mkdir(exist_ok=True);FRONTEND=ROOT/'frontend'
+app=FastAPI(title='Village Market API',version='2.0')
+@app.middleware('http')
+async def no_stale_frontend(request,call_next):
+    response=await call_next(request)
+    if request.url.path=='/' or request.url.path.startswith('/static/'):
+        response.headers['Cache-Control']='no-store, no-cache, must-revalidate, max-age=0'
+        response.headers['Pragma']='no-cache'
+        response.headers['Expires']='0'
+    return response
+app.mount('/static',StaticFiles(directory=FRONTEND),name='static');app.mount('/uploads',StaticFiles(directory=UPLOADS),name='uploads')
+class Manager:
+    def __init__(self): self.clients=set();self.loop=None
+    async def connect(self,w):
+        await w.accept();self.clients.add(w);self.loop=asyncio.get_running_loop()
+    def disconnect(self,w): self.clients.discard(w)
+    async def broadcast(self,d):
+        for w in list(self.clients):
+            try: await w.send_json(d)
+            except Exception: self.disconnect(w)
+manager=Manager()
+def external(user,title,message):
+    if not user:return
+    try:
+        if user.email and os.getenv('SMTP_HOST'):
+            msg=EmailMessage();msg['Subject']=title;msg['From']=os.getenv('SMTP_FROM',os.getenv('SMTP_USER','no-reply@villagemarket'));msg['To']=user.email;msg.set_content(message)
+            with smtplib.SMTP(os.getenv('SMTP_HOST'),int(os.getenv('SMTP_PORT','587')),timeout=10) as s:
+                if os.getenv('SMTP_TLS','1')!='0': s.starttls()
+                if os.getenv('SMTP_USER'): s.login(os.getenv('SMTP_USER'),os.getenv('SMTP_PASSWORD',''))
+                s.send_message(msg)
+    except Exception: pass
+    try:
+        if user.phone and os.getenv('TWILIO_ACCOUNT_SID') and os.getenv('TWILIO_AUTH_TOKEN') and os.getenv('TWILIO_FROM'):
+            from urllib.parse import urlencode
+            auth=base64.b64encode(f"{os.getenv('TWILIO_ACCOUNT_SID')}:{os.getenv('TWILIO_AUTH_TOKEN')}".encode()).decode();url=f"https://api.twilio.com/2010-04-01/Accounts/{os.getenv('TWILIO_ACCOUNT_SID')}/Messages.json";httpx.post(url,headers={'Authorization':f'Basic {auth}'},data=urlencode({'From':os.getenv('TWILIO_FROM'),'To':'+91'+user.phone,'Body':f'{title}: {message}'}),timeout=10)
+    except Exception: pass
+def notify(db,uid,title,msg): db.add(Notification(user_id=uid,title=title,message=msg));external(db.get(User,uid),title,msg)
+def notify_admins(db,title,msg):
+    for a in db.query(User).filter(User.role=='superadmin').all(): notify(db,a.id,title,msg)
+def emit(payload):
+    try:
+        if manager.loop and manager.loop.is_running():
+            asyncio.run_coroutine_threadsafe(manager.broadcast(payload),manager.loop)
+            return
+        loop=asyncio.get_running_loop()
+        loop.create_task(manager.broadcast(payload))
+    except Exception: pass
+def upload(file,uid):
+    if not file or not file.filename:return None
+    fn=f'{uid}_{Path(file.filename).name.replace(" ","_")}';backend=os.getenv('STORAGE_BACKEND','local').lower()
+    if backend=='s3' and os.getenv('S3_BUCKET'):
+        try:
+            import boto3;s3=boto3.client('s3',region_name=os.getenv('AWS_REGION'));s3.upload_fileobj(file.file,os.getenv('S3_BUCKET'),fn,ExtraArgs={'ContentType':file.content_type or 'application/octet-stream'});base=os.getenv('S3_PUBLIC_BASE_URL');return f'{base.rstrip("/")}/{fn}' if base else f's3://{os.getenv("S3_BUCKET")}/{fn}'
+        except Exception as e: raise HTTPException(500,f'S3 upload failed: {e}')
+    with open(UPLOADS/fn,'wb') as out: shutil.copyfileobj(file.file,out)
+    return f'/uploads/{fn}'
+def crop_private(c,db):
+    f=db.get(User,c.farmer_id);return {'id':c.id,'name':c.name,'category':c.category,'quantity_kg':c.quantity_kg,'available_kg':c.available_kg,'location':c.location,'address_line':c.address_line,'village':c.village,'mandal':c.mandal,'district':c.district,'state':c.state,'pincode':c.pincode,'landmark':c.landmark,'latitude':c.latitude,'longitude':c.longitude,'expected_price':c.expected_price,'quality':c.quality,'harvest_date':c.harvest_date,'details':c.details,'photo':c.photo,'status':c.status,'market_price':c.market_price,'admin_note':c.admin_note,'farmer_id':c.farmer_id,'farmer_name':f.name if f else 'Farmer','farmer_phone':f.phone if f else ''}
+def crop_public(c,db):
+    d=crop_private(c,db)
+    for k in ['location','address_line','village','mandal','district','state','pincode','landmark','latitude','longitude','expected_price','admin_note','farmer_id','farmer_name','farmer_phone']:d.pop(k,None)
+    return d
+def booking_dict(b,db,private=False,expose_otp=False):
+    c=db.get(Crop,b.crop_id);buyer=db.get(User,b.buyer_id);farmer=db.get(User,c.farmer_id) if c else None;rv=db.query(Review).filter(Review.booking_id==b.id).first()
+    d={'id':b.id,'crop_id':b.crop_id,'crop_name':c.name if c else 'Crop','crop_photo':c.photo if c else None,'harvest_date':c.harvest_date if c else None,'quantity_kg':b.quantity_kg,'amount':b.amount,'final_price':b.final_price,'farmer_note':b.farmer_note,'status':b.status,'payment_status':b.payment_status,'delivery_method':'delivery','delivery_address':b.delivery_address,'created_at':b.created_at.isoformat() if b.created_at else None,'updated_at':b.updated_at.isoformat() if b.updated_at else None,'payment_reference':b.payment_reference,'delivered_at':b.delivered_at.isoformat() if b.delivered_at else None,'review':({'rating':rv.rating,'comment':rv.comment} if rv else None),'has_delivery_otp':bool(b.delivery_otp)}
+    if expose_otp and b.status=='shipped': d['delivery_otp']=b.delivery_otp
+    if private:d.update({'buyer_name':buyer.name if buyer else 'Buyer','buyer_phone':buyer.phone if buyer else '','farmer_name':farmer.name if farmer else 'Farmer','farmer_phone':farmer.phone if farmer else '','crop_location':c.location if c else '','delivery_latitude':b.delivery_latitude,'delivery_longitude':b.delivery_longitude})
+    return d
+
+
+def support_ticket_dict(ticket,db,include_messages=True):
+    owner=db.get(User,ticket.user_id)
+    data={'id':ticket.id,'user_id':ticket.user_id,'user_name':owner.name if owner else 'User','user_phone':owner.phone if owner else '','user_role':({'customer':'buyer','vendor':'farmer'}.get(owner.role,owner.role) if owner else ''),'subject':ticket.subject,'category':ticket.category,'status':ticket.status,'created_at':ticket.created_at.isoformat() if ticket.created_at else None,'updated_at':ticket.updated_at.isoformat() if ticket.updated_at else None}
+    if include_messages:
+        rows=db.query(SupportMessage).filter(SupportMessage.ticket_id==ticket.id).order_by(SupportMessage.id.asc()).all()
+        data['messages']=[{'id':m.id,'sender_user_id':m.sender_user_id,'sender_role':m.sender_role,'message':m.message,'created_at':m.created_at.isoformat() if m.created_at else None} for m in rows]
+    return data
+
+def st(s):return {'requested':'Order confirmed','farmer_pending_admin':'Farmer accepted · Awaiting admin confirmation','farmer_accepted':'Order accepted','farmer_rejected':'Rejected by farmer','confirmed':'Track your order','processing':'Track your order','shipped':'Shipped','delivered':'Delivered'}.get(s,s.replace('_',' ').title())
+def low_stock_check(db,c):
+    if c.status=='approved' and c.available_kg<10:
+        notify(db,c.farmer_id,'Low stock alert',f'{c.name} has only {c.available_kg:g} kg left. Add stock to reach at least 10 kg. Until then it is automatically hidden from the buyer marketplace.')
+
+def address_dict(a):
+    try:data=json.loads(a.data_json or '{}')
+    except Exception:data={}
+    return {'id':a.id,'kind':a.kind,'label':a.label,'data':data,'created_at':a.created_at.isoformat() if a.created_at else None}
+@app.get('/',include_in_schema=False)
+def home():return FileResponse(FRONTEND/'index.html')
+@app.get('/admin',include_in_schema=False)
+def admin_home():return FileResponse(FRONTEND/'admin.html')
+@app.post('/api/auth/send-otp')
+def sendotp(data:SendOtp,db:Session=Depends(get_db)):return {'message':'OTP generated','demo_otp':send_otp(data.phone,db)}
+@app.post('/api/auth/verify-otp')
+def verifyotp(data:VerifyOtp,db:Session=Depends(get_db)):
+    tok,u=verify_otp(data.phone,data.code,data.role,data.name,data.email,db);return {'token':tok,'user':{'id':u.id,'name':u.name,'phone':u.phone,'email':u.email,'role':u.role}}
+def _hash_admin_password(password:str)->str:
+    salt=secrets.token_bytes(16)
+    digest=hashlib.pbkdf2_hmac('sha256',password.encode(),salt,200000)
+    return f'pbkdf2_sha256$200000${salt.hex()}${digest.hex()}'
+
+def _verify_admin_password(password:str,stored:str)->bool:
+    try:
+        algo,rounds,salt_hex,digest_hex=stored.split('$',3)
+        if algo!='pbkdf2_sha256': return False
+        check=hashlib.pbkdf2_hmac('sha256',password.encode(),bytes.fromhex(salt_hex),int(rounds)).hex()
+        return hmac.compare_digest(check,digest_hex)
+    except Exception:
+        return False
+
+@app.post('/api/admin/login')
+def admin_login(data:AdminLogin,db:Session=Depends(get_db)):
+    aid=data.admin_id.strip()
+    primary_id,primary_pw=admin_credentials()
+    account=None
+    if hmac.compare_digest(aid,primary_id) and hmac.compare_digest(data.password,primary_pw):
+        phone=f'__admin__:{primary_id}'
+        u=db.query(User).filter(User.phone==phone).first()
+        if not u:
+            legacy=db.query(User).filter(User.phone=='__admin__').first()
+            if legacy:
+                legacy.phone=phone;u=legacy
+            else:
+                u=User(phone=phone,name='Primary Admin',role='superadmin',verified=True);db.add(u);db.flush()
+        u.role='superadmin'
+    else:
+        account=db.query(AdminAccount).filter(AdminAccount.admin_id==aid,AdminAccount.active==True).first()
+        if not account or not _verify_admin_password(data.password,account.password_hash):raise HTTPException(401,'Invalid admin ID or password')
+        u=db.get(User,account.user_id)
+        if not u:raise HTTPException(401,'Admin account is unavailable')
+        u.role='superadmin'
+    token=secrets.token_hex(24);db.add(__import__('backend.models',fromlist=['Session']).Session(token=token,user_id=u.id,expires_at=datetime.utcnow()+timedelta(days=1)));db.commit();return {'token':token,'user':{'id':u.id,'name':u.name,'role':u.role,'admin_id':aid}}
+
+@app.get('/api/admin/admins')
+def list_admins(db:Session=Depends(get_db),admin:User=Depends(require_role('superadmin'))):
+    primary_id,_=admin_credentials()
+    rows=[{'id':0,'admin_id':primary_id,'name':'Primary Admin','primary':True,'active':True,'user_id':None}]
+    rows.extend({'id':a.id,'admin_id':a.admin_id,'name':a.display_name,'primary':False,'active':a.active,'user_id':a.user_id,'created_at':a.created_at.isoformat() if a.created_at else None} for a in db.query(AdminAccount).order_by(AdminAccount.id.desc()).all())
+    return rows
+
+@app.post('/api/admin/admins')
+def create_admin(data:AdminCreate,db:Session=Depends(get_db),admin:User=Depends(require_role('superadmin'))):
+    admin_id=data.admin_id.strip();name=data.name.strip();primary_id,_=admin_credentials()
+    if admin_id.lower()==primary_id.lower() or db.query(AdminAccount).filter(AdminAccount.admin_id==admin_id).first():raise HTTPException(409,'Admin ID already exists')
+    phone=f'__admin__:{admin_id}'
+    if db.query(User).filter(User.phone==phone).first():raise HTTPException(409,'Admin ID already exists')
+    u=User(phone=phone,name=name,role='superadmin',verified=True);db.add(u);db.flush()
+    a=AdminAccount(admin_id=admin_id,display_name=name,password_hash=_hash_admin_password(data.password),user_id=u.id,created_by_user_id=admin.id,active=True);db.add(a);db.commit();db.refresh(a)
+    return {'id':a.id,'admin_id':a.admin_id,'name':a.display_name,'primary':False,'active':True}
+
+@app.delete('/api/admin/admins/{admin_account_id}')
+def delete_admin(admin_account_id:int,db:Session=Depends(get_db),admin:User=Depends(require_role('superadmin'))):
+    a=db.get(AdminAccount,admin_account_id)
+    if not a:raise HTTPException(404,'Admin account not found')
+    if a.user_id==admin.id:raise HTTPException(400,'You cannot remove the admin account you are currently using')
+    u=db.get(User,a.user_id)
+    db.query(__import__('backend.models',fromlist=['Session']).Session).filter(__import__('backend.models',fromlist=['Session']).Session.user_id==a.user_id).delete()
+    db.delete(a)
+    if u:db.delete(u)
+    db.commit();return {'ok':True}
+@app.get('/api/me')
+def me(user:User=Depends(current_user)):return {'id':user.id,'name':user.name,'email':user.email,'phone':user.phone,'role':user.role,'display_role':{'customer':'buyer','vendor':'farmer','superadmin':'admin'}.get(user.role,user.role)}
+@app.get('/api/addresses')
+def saved_addresses(kind:str,db:Session=Depends(get_db),user:User=Depends(current_user)):
+    if kind not in {'delivery','farm'}: raise HTTPException(400,'Invalid address type')
+    return [address_dict(a) for a in db.query(SavedAddress).filter(SavedAddress.user_id==user.id,SavedAddress.kind==kind).order_by(SavedAddress.id.desc()).all()]
+@app.post('/api/addresses')
+def save_address(data:AddressSave,db:Session=Depends(get_db),user:User=Depends(current_user)):
+    raw=json.dumps(data.data,ensure_ascii=False,sort_keys=True)
+    old=db.query(SavedAddress).filter(SavedAddress.user_id==user.id,SavedAddress.kind==data.kind,SavedAddress.data_json==raw).first()
+    if old:return address_dict(old)
+    a=SavedAddress(user_id=user.id,kind=data.kind,label=(data.label or 'Saved address').strip()[:100],data_json=raw);db.add(a);db.commit();db.refresh(a);return address_dict(a)
+@app.delete('/api/addresses/{address_id}')
+def delete_address(address_id:int,db:Session=Depends(get_db),user:User=Depends(current_user)):
+    a=db.get(SavedAddress,address_id)
+    if not a or a.user_id!=user.id:raise HTTPException(404,'Saved address not found')
+    db.delete(a);db.commit();return {'ok':True}
+@app.get('/api/categories')
+def cats(db:Session=Depends(get_db)):return sorted({c.category for c in db.query(Crop).filter(Crop.status=='approved').all()})
+@app.get('/api/crops')
+def crops(q:str='',category:str='all',min_price:float|None=None,max_price:float|None=None,sort:str='newest',db:Session=Depends(get_db)):
+    rows=db.query(Crop).filter(Crop.status=='approved',Crop.available_kg>=10,Crop.market_price>0).all()
+    if q:rows=[c for c in rows if q.lower() in f'{c.name} {c.category} {c.quality}'.lower()]
+    if category!='all':rows=[c for c in rows if c.category.lower()==category.lower()]
+    if min_price is not None:rows=[c for c in rows if c.market_price>=min_price]
+    if max_price is not None:rows=[c for c in rows if c.market_price<=max_price]
+    rows.sort(key=(lambda c:c.market_price or 0) if sort=='price_asc' else (lambda c:c.market_price or 0) if sort=='price_desc' else (lambda c:c.available_kg) if sort=='stock_desc' else (lambda c:c.id),reverse=sort in ['price_desc','stock_desc'] if sort!='newest' else True)
+    return [crop_public(c,db) for c in rows]
+@app.get('/api/crops/{crop_id}')
+def crop_detail(crop_id:int,db:Session=Depends(get_db)):
+    c=db.get(Crop,crop_id)
+    if not c or c.status!='approved' or c.available_kg<10 or not c.market_price or c.market_price<=0:raise HTTPException(404,'Crop not found')
+    return crop_public(c,db)
+@app.post('/api/crops')
+def add_crop(name:str=Form(...),category:str=Form(...),quantity_kg:float=Form(...),location:str=Form(...),address_line:str=Form(''),village:str=Form(''),mandal:str=Form(''),district:str=Form(''),state:str=Form(''),pincode:str=Form(''),landmark:str=Form(''),latitude:str=Form(''),longitude:str=Form(''),expected_price:float=Form(...),quality:str=Form(...),harvest_date:str=Form(...),details:str=Form(...),photo:UploadFile=File(...),db:Session=Depends(get_db),farmer:User=Depends(require_role('vendor'))):
+    required_text={'name':name,'category':category,'quality':quality,'harvest_date':harvest_date,'details':details}
+    missing=[label for label,value in required_text.items() if not str(value).strip()]
+    if missing:raise HTTPException(400,f"Required crop fields missing: {', '.join(missing)}")
+    if quantity_kg<10 or expected_price<=0:raise HTTPException(400,'Quantity must be at least 10 kg and price must be positive')
+    if not photo or not photo.filename:raise HTTPException(400,'Crop photo is required')
+    c=Crop(farmer_id=farmer.id,name=name,category=category,quantity_kg=quantity_kg,available_kg=quantity_kg,location=location,address_line=address_line,village=village,mandal=mandal,district=district,state=state,pincode=pincode,landmark=landmark,latitude=latitude,longitude=longitude,expected_price=expected_price,quality=quality,harvest_date=harvest_date,details=details,photo=upload(photo,farmer.id));db.add(c);db.flush();notify_admins(db,'New crop submitted',f'Crop {c.name} is waiting for inspection.');db.commit();emit({'type':'crop_submitted','crop_id':c.id});return crop_private(c,db)
+@app.get('/api/farmer/crops')
+def fcrops(db:Session=Depends(get_db),farmer:User=Depends(require_role('vendor'))):return [crop_private(c,db) for c in db.query(Crop).filter(Crop.farmer_id==farmer.id).order_by(Crop.id.desc()).all()]
+@app.patch('/api/farmer/crops/{crop_id}/stock')
+def add_stock(crop_id:int,data:StockUpdate,db:Session=Depends(get_db),farmer:User=Depends(require_role('vendor'))):
+    c=db.get(Crop,crop_id)
+    if not c or c.farmer_id!=farmer.id:raise HTTPException(404,'Crop not found')
+    if c.status!='approved':raise HTTPException(400,'Stock can be added only to an approved crop')
+    c.quantity_kg=round(c.quantity_kg+data.quantity_kg,2);c.available_kg=round(c.available_kg+data.quantity_kg,2)
+    db.commit();emit({'type':'crop_stock_updated','crop_id':c.id,'available_kg':c.available_kg});return crop_private(c,db)
+@app.get('/api/farmer/dashboard')
+def fdash(db:Session=Depends(get_db),farmer:User=Depends(require_role('vendor'))):
+    crops=db.query(Crop).filter(Crop.farmer_id==farmer.id).all();ids=[c.id for c in crops];orders=db.query(Booking).filter(Booking.crop_id.in_(ids)).all() if ids else [];accepted_statuses={'farmer_pending_admin','farmer_accepted','processing','confirmed','shipped','delivered'};return {'crops':len(crops),'orders':len(orders),'accepted_orders':sum(b.status in accepted_statuses for b in orders),'revenue':sum(b.amount for b in orders if b.status in accepted_statuses),'low_stock':[{'id':c.id,'name':c.name,'available_kg':c.available_kg} for c in crops if c.status=='approved' and c.available_kg<10]}
+@app.post('/api/bookings')
+def book(data:BookingCreate,db:Session=Depends(get_db),buyer:User=Depends(require_role('customer'))):
+    c=db.get(Crop,data.crop_id)
+    if not c or c.status!='approved' or not c.market_price:raise HTTPException(404,'Approved crop with confirmed price not found')
+    if c.farmer_id==buyer.id:raise HTTPException(400,'You cannot order your own crop')
+    if not (data.delivery_address or '').strip():raise HTTPException(400,'Delivery address is required')
+    if data.quantity_kg>c.available_kg:raise HTTPException(400,'Requested quantity exceeds available stock')
+    b=Booking(crop_id=c.id,buyer_id=buyer.id,quantity_kg=data.quantity_kg,amount=round(data.quantity_kg*c.market_price,2),final_price=c.market_price,status='requested',delivery_method='delivery',delivery_address=data.delivery_address,delivery_latitude=data.delivery_latitude,delivery_longitude=data.delivery_longitude);c.available_kg=round(c.available_kg-data.quantity_kg,2);db.add(b);db.flush();low_stock_check(db,c);notify(db,c.farmer_id,'New order received',f'You got {data.quantity_kg:g} kg order for {c.name}. Open Bookings to accept or reject.');notify_admins(db,'New buyer order',f'Order #{b.id} placed for {data.quantity_kg:g} kg of {c.name}.');db.commit();emit({'type':'new_order','booking_id':b.id});return {'id':b.id,'status':b.status,'amount':b.amount}
+@app.post('/api/bookings/cart')
+def cart_checkout(data:CartCheckout,db:Session=Depends(get_db),buyer:User=Depends(require_role('customer'))):
+    if not data.items: raise HTTPException(400,'Cart is empty')
+    if not (data.delivery_address or '').strip(): raise HTTPException(400,'Delivery address is required')
+    merged={}
+    for it in data.items: merged[it.crop_id]=merged.get(it.crop_id,0)+it.quantity_kg
+    ids=[];total=0
+    for crop_id,qty in merged.items():
+        c=db.get(Crop,crop_id)
+        if not c or c.status!='approved' or not c.market_price: raise HTTPException(400,'A cart item is no longer available')
+        if c.farmer_id==buyer.id: raise HTTPException(400,f'You cannot order your own crop: {c.name}')
+        if qty<10: raise HTTPException(400,'Each cart item must be at least 10 kg')
+        if qty>c.available_kg: raise HTTPException(400,f'Not enough stock for {c.name}')
+        b=Booking(crop_id=c.id,buyer_id=buyer.id,quantity_kg=qty,amount=round(qty*c.market_price,2),final_price=c.market_price,status='requested',delivery_method='delivery',delivery_address=data.delivery_address,delivery_latitude=data.delivery_latitude,delivery_longitude=data.delivery_longitude)
+        c.available_kg=round(c.available_kg-qty,2);db.add(b);db.flush();low_stock_check(db,c);ids.append(b.id);total+=b.amount;notify(db,c.farmer_id,'New order received',f'You got {qty:g} kg order for {c.name}. Open Bookings to accept or reject.')
+    notify_admins(db,'New cart orders',f'{len(ids)} new buyer orders were placed.');db.commit();emit({'type':'new_orders','booking_ids':ids});return {'booking_ids':ids,'total':round(total,2)}
+@app.get('/api/bookings')
+def mybookings(db:Session=Depends(get_db),user:User=Depends(current_user)):
+    rows=db.query(Booking).order_by(Booking.id.desc()).all()
+    if user.role=='customer':rows=[b for b in rows if b.buyer_id==user.id]
+    elif user.role=='vendor':rows=[b for b in rows if (db.get(Crop,b.crop_id) and db.get(Crop,b.crop_id).farmer_id==user.id)]
+    out=[booking_dict(b,db,private=user.role!='customer',expose_otp=user.role=='customer') for b in rows]
+    return out
+@app.patch('/api/bookings/{booking_id}/decision')
+def decision(booking_id:int,data:Decision,db:Session=Depends(get_db),farmer:User=Depends(require_role('vendor'))):
+    b=db.get(Booking,booking_id);c=db.get(Crop,b.crop_id) if b else None
+    if not b or not c or c.farmer_id!=farmer.id:raise HTTPException(404,'Booking not found')
+    if b.status!='requested':raise HTTPException(400,'This order is no longer waiting for farmer response')
+    if data.action=='reject':
+        r=(data.reason or '').strip()
+        if not r:raise HTTPException(400,'Please provide a reason for rejecting the order')
+        c.available_kg=round(c.available_kg+b.quantity_kg,2);b.status='farmer_rejected';b.farmer_note=r
+    else:b.status='farmer_pending_admin';b.farmer_note='Order accepted by farmer; waiting for admin confirmation.'
+    if data.action=='accept':
+        notify_admins(db,'Farmer accepted order',f'Order #{b.id} was accepted by the farmer. Please confirm the order for the buyer.')
+    else:
+        notify(db,b.buyer_id,'Order update',f'{c.name} order ({b.quantity_kg:g} kg) was rejected by the farmer.')
+        notify_admins(db,'Order response',f'Order #{b.id}: {b.status}.')
+    db.commit();emit({'type':'order_decision','booking_id':b.id,'status':b.status});return booking_dict(b,db,True)
+@app.patch('/api/bookings/{booking_id}/cancel')
+def cancel_booking(booking_id:int,db:Session=Depends(get_db),buyer:User=Depends(require_role('customer'))):
+    b=db.get(Booking,booking_id);c=db.get(Crop,b.crop_id) if b else None
+    if not b or not c or b.buyer_id!=buyer.id: raise HTTPException(404,'Order not found')
+    if b.status not in {'requested','farmer_pending_admin'}: raise HTTPException(400,'This order cannot be cancelled now')
+    c.available_kg=round(c.available_kg+b.quantity_kg,2)
+    b.status='buyer_cancelled'
+    b.farmer_note='Order cancelled by buyer.'
+    notify(db,c.farmer_id,'Order cancelled',f'Order #{b.id} for {b.quantity_kg:g} kg was cancelled by the buyer.')
+    notify_admins(db,'Order cancelled',f'Order #{b.id} was cancelled by the buyer.')
+    db.commit();emit({'type':'order_cancelled','booking_id':b.id});return booking_dict(b,db,private=False)
+
+@app.post('/api/bookings/{booking_id}/payment-intent')
+def payment_intent(booking_id:int,db:Session=Depends(get_db),buyer:User=Depends(require_role('customer'))):
+    b=db.get(Booking,booking_id)
+    if not b or b.buyer_id!=buyer.id:raise HTTPException(404,'Booking not found')
+    if b.status!='farmer_accepted':raise HTTPException(400,'Waiting for farmer to accept this order')
+    kid=os.getenv('RAZORPAY_KEY_ID');secret=os.getenv('RAZORPAY_KEY_SECRET')
+    if kid and secret:
+        r=httpx.post('https://api.razorpay.com/v1/orders',auth=(kid,secret),json={'amount':int(b.amount*100),'currency':'INR','receipt':f'vm-{b.id}'},timeout=15)
+        if r.status_code>=400:raise HTTPException(502,'Razorpay order creation failed')
+        x=r.json();b.payment_reference=x['id'];db.commit();return {'gateway':'razorpay','key_id':kid,'order_id':x['id'],'amount':int(b.amount*100),'currency':'INR'}
+    return {'gateway':'not_configured','message':'Configure RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET for live payments.','amount':b.amount}
+@app.post('/api/payments/razorpay/verify')
+def verify_payment(payload:dict,db:Session=Depends(get_db),buyer:User=Depends(require_role('customer'))):
+    b=db.get(Booking,int(payload.get('booking_id',0)));secret=os.getenv('RAZORPAY_KEY_SECRET')
+    if not b or b.buyer_id!=buyer.id or not secret:raise HTTPException(400,'Invalid payment')
+    raw=f"{payload.get('razorpay_order_id')}|{payload.get('razorpay_payment_id')}";sig=hmac.new(secret.encode(),raw.encode(),hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(sig,str(payload.get('razorpay_signature'))):raise HTTPException(400,'Payment signature verification failed')
+    b.payment_status='paid';b.status='processing';b.payment_reference=payload.get('razorpay_payment_id');notify_admins(db,'Payment received',f'Payment received for order #{b.id}.');db.commit();return {'payment_status':'paid','status':'processing'}
+@app.post('/api/bookings/{booking_id}/pay')
+def local_pay(booking_id:int,db:Session=Depends(get_db),buyer:User=Depends(require_role('customer'))):
+    raise HTTPException(410,'Demo/local payment has been disabled. Configure Razorpay for live online payments.')
+@app.post('/api/bookings/{booking_id}/review')
+def add_review(booking_id:int,data:ReviewCreate,db:Session=Depends(get_db),buyer:User=Depends(require_role('customer'))):
+    b=db.get(Booking,booking_id)
+    if not b or b.buyer_id!=buyer.id:raise HTTPException(404,'Order not found')
+    if b.status!='delivered':raise HTTPException(400,'You can review an order after it is delivered')
+    if db.query(Review).filter(Review.booking_id==b.id).first():raise HTTPException(400,'Review already submitted')
+    db.add(Review(booking_id=b.id,buyer_id=buyer.id,crop_id=b.crop_id,rating=data.rating,comment=data.comment.strip()[:1000]));db.commit();return {'message':'Review submitted'}
+@app.get('/api/crops/{crop_id}/reviews')
+def reviews(crop_id:int,db:Session=Depends(get_db)):return [{'rating':r.rating,'comment':r.comment,'created_at':r.created_at.isoformat()} for r in db.query(Review).filter(Review.crop_id==crop_id).order_by(Review.id.desc()).all()]
+@app.get('/api/notifications')
+def notifications(db:Session=Depends(get_db),user:User=Depends(current_user)):
+    return [{'id':n.id,'title':n.title,'message':n.message,'read':n.read,'created_at':n.created_at.isoformat()} for n in db.query(Notification).filter(Notification.user_id==user.id).order_by(Notification.id.desc()).limit(30).all()]
+@app.patch('/api/notifications/{notification_id}')
+def mark_notification(notification_id:int,data:NotificationMark,db:Session=Depends(get_db),user:User=Depends(current_user)):
+    n=db.query(Notification).filter(Notification.id==notification_id,Notification.user_id==user.id).first()
+    if not n:raise HTTPException(404,'Notification not found')
+    n.read=data.read;db.commit();return {'message':'Updated'}
+@app.delete('/api/notifications/{notification_id}')
+def dismiss_notification(notification_id:int,db:Session=Depends(get_db),user:User=Depends(current_user)):
+    n=db.query(Notification).filter(Notification.id==notification_id,Notification.user_id==user.id).first()
+    if not n:raise HTTPException(404,'Notification not found')
+    db.delete(n);db.commit();return {'message':'Notification dismissed'}
+
+@app.get('/api/support/tickets')
+def support_tickets(db:Session=Depends(get_db),user:User=Depends(current_user)):
+    rows=db.query(SupportTicket).filter(SupportTicket.user_id==user.id).order_by(SupportTicket.updated_at.desc(),SupportTicket.id.desc()).all()
+    return [support_ticket_dict(x,db,True) for x in rows]
+
+@app.post('/api/support/tickets')
+def create_support_ticket(data:SupportTicketCreate,db:Session=Depends(get_db),user:User=Depends(current_user)):
+    ticket=SupportTicket(user_id=user.id,subject=data.subject.strip(),category=data.category,status='open')
+    db.add(ticket);db.flush()
+    db.add(SupportMessage(ticket_id=ticket.id,sender_user_id=user.id,sender_role=({'customer':'buyer','vendor':'farmer'}.get(user.role,user.role)),message=data.message.strip()))
+    notify_admins(db,'New live support request',f'{user.name} opened support ticket #{ticket.id}: {ticket.subject}')
+    db.commit();db.refresh(ticket);emit({'type':'support_update','ticket_id':ticket.id})
+    return support_ticket_dict(ticket,db,True)
+
+@app.post('/api/support/tickets/{ticket_id}/messages')
+def user_support_message(ticket_id:int,data:SupportMessageCreate,db:Session=Depends(get_db),user:User=Depends(current_user)):
+    ticket=db.query(SupportTicket).filter(SupportTicket.id==ticket_id,SupportTicket.user_id==user.id).first()
+    if not ticket: raise HTTPException(404,'Support ticket not found')
+    if ticket.status=='closed': raise HTTPException(400,'This support ticket is closed')
+    db.add(SupportMessage(ticket_id=ticket.id,sender_user_id=user.id,sender_role=({'customer':'buyer','vendor':'farmer'}.get(user.role,user.role)),message=data.message.strip()))
+    ticket.updated_at=datetime.utcnow();notify_admins(db,'Live support message',f'New message on support ticket #{ticket.id}.')
+    db.commit();emit({'type':'support_update','ticket_id':ticket.id})
+    return support_ticket_dict(ticket,db,True)
+
+@app.patch('/api/support/tickets/{ticket_id}/status')
+def user_support_status(ticket_id:int,data:SupportStatusUpdate,db:Session=Depends(get_db),user:User=Depends(current_user)):
+    ticket=db.query(SupportTicket).filter(SupportTicket.id==ticket_id,SupportTicket.user_id==user.id).first()
+    if not ticket: raise HTTPException(404,'Support ticket not found')
+    ticket.status=data.status;ticket.updated_at=datetime.utcnow();db.commit();emit({'type':'support_update','ticket_id':ticket.id})
+    return support_ticket_dict(ticket,db,True)
+
+@app.get('/api/admin/support/tickets')
+def admin_support_tickets(db:Session=Depends(get_db),admin:User=Depends(require_role('superadmin'))):
+    rows=db.query(SupportTicket).order_by(SupportTicket.status.desc(),SupportTicket.updated_at.desc(),SupportTicket.id.desc()).all()
+    return [support_ticket_dict(x,db,True) for x in rows]
+
+@app.post('/api/admin/support/tickets/{ticket_id}/messages')
+def admin_support_message(ticket_id:int,data:SupportMessageCreate,db:Session=Depends(get_db),admin:User=Depends(require_role('superadmin'))):
+    ticket=db.get(SupportTicket,ticket_id)
+    if not ticket: raise HTTPException(404,'Support ticket not found')
+    if ticket.status=='closed': raise HTTPException(400,'This support ticket is closed. Reopen it before replying.')
+    db.add(SupportMessage(ticket_id=ticket.id,sender_user_id=admin.id,sender_role='admin',message=data.message.strip()))
+    ticket.updated_at=datetime.utcnow();notify(db,ticket.user_id,'Live support reply',f'Admin replied to support ticket #{ticket.id}: {ticket.subject}')
+    db.commit();emit({'type':'support_update','ticket_id':ticket.id})
+    return support_ticket_dict(ticket,db,True)
+
+@app.patch('/api/admin/support/tickets/{ticket_id}/status')
+def admin_support_status(ticket_id:int,data:SupportStatusUpdate,db:Session=Depends(get_db),admin:User=Depends(require_role('superadmin'))):
+    ticket=db.get(SupportTicket,ticket_id)
+    if not ticket: raise HTTPException(404,'Support ticket not found')
+    ticket.status=data.status;ticket.updated_at=datetime.utcnow()
+    notify(db,ticket.user_id,'Support ticket updated',f'Support ticket #{ticket.id} is now {ticket.status}.')
+    db.commit();emit({'type':'support_update','ticket_id':ticket.id})
+    return support_ticket_dict(ticket,db,True)
+
+@app.get('/api/admin/pending')
+def admin_pending(db:Session=Depends(get_db),admin:User=Depends(require_role('superadmin'))):return [crop_private(c,db) for c in db.query(Crop).filter(Crop.status=='pending').order_by(Crop.id.desc()).all()]
+@app.patch('/api/admin/crops/{crop_id}')
+def admin_crop(crop_id:int,data:Approval,db:Session=Depends(get_db),admin:User=Depends(require_role('superadmin'))):
+    c=db.get(Crop,crop_id)
+    if not c:raise HTTPException(404,'Crop not found')
+    if data.action=='reject':c.status='rejected';c.market_price=None;c.admin_note=data.admin_note or 'Crop rejected by admin.';notify(db,c.farmer_id,'Crop rejected',f'{c.name} was rejected by admin.');db.commit();return crop_private(c,db)
+    q=data.inspected_quantity if data.inspected_quantity is not None else c.quantity_kg
+    if q<10 or q>c.quantity_kg:raise HTTPException(400,'Verified quantity must be at least 10 kg and cannot exceed submitted quantity')
+    if not data.market_price or data.market_price<=0:raise HTTPException(400,'Final price is required')
+    c.quantity_kg=round(q,2);c.available_kg=round(q,2);c.quality=(data.inspected_quality or c.quality).strip();c.market_price=round(data.market_price,2);c.status='approved';c.admin_note=data.admin_note or '';notify(db,c.farmer_id,'Crop approved',f'{c.name} approved at ₹{c.market_price:g}/kg.');db.commit();emit({'type':'crop_approved','crop_id':c.id});return crop_private(c,db)
+@app.get('/api/admin/crops/published')
+def published_crops(db:Session=Depends(get_db),admin:User=Depends(require_role('superadmin'))):
+    return [crop_private(c,db) for c in db.query(Crop).filter(Crop.status=='approved').order_by(Crop.id.desc()).all()]
+@app.patch('/api/admin/crops/{crop_id}/edit')
+def admin_edit_crop(crop_id:int,data:AdminCropEdit,db:Session=Depends(get_db),admin:User=Depends(require_role('superadmin'))):
+    c=db.get(Crop,crop_id)
+    if not c: raise HTTPException(404,'Crop not found')
+    updates=data.model_dump(exclude_unset=True)
+    if not updates: raise HTTPException(400,'No crop changes were provided')
+    old_market=c.market_price
+    old_total=float(c.quantity_kg or 0); old_available=float(c.available_kg or 0)
+    sold=max(0.0,old_total-old_available)
+    if 'quantity_kg' in updates:
+        new_total=round(float(updates.pop('quantity_kg')),2)
+        if new_total < sold: raise HTTPException(400,f'Quantity cannot be below {sold:g} kg because that amount has already been ordered')
+        c.quantity_kg=new_total;c.available_kg=round(max(0,new_total-sold),2)
+    for field in ('name','category','quality','harvest_date','details','admin_note'):
+        if field in updates:
+            value=updates.pop(field)
+            setattr(c,field,value.strip() if isinstance(value,str) else value)
+    if 'expected_price' in updates: c.expected_price=round(float(updates.pop('expected_price')),2)
+    if 'market_price' in updates: c.market_price=round(float(updates.pop('market_price')),2)
+    if c.status=='approved' and (c.market_price is None or c.market_price<=0): raise HTTPException(400,'Published crops require a valid market price')
+    note='Crop details updated by admin.'
+    if old_market!=c.market_price and c.market_price:
+        note=f'Market price updated from ₹{old_market:g}/kg to ₹{c.market_price:g}/kg.' if old_market else f'Market price set to ₹{c.market_price:g}/kg.'
+    notify(db,c.farmer_id,'Crop updated by admin',f'{c.name}: {note}')
+    db.commit();emit({'type':'crop_updated','crop_id':c.id});return crop_private(c,db)
+
+@app.patch('/api/admin/crops/{crop_id}/remove')
+def remove_market_crop_page(crop_id:int,data:CropRemoval,db:Session=Depends(get_db),admin:User=Depends(require_role('superadmin'))):
+    c=db.get(Crop,crop_id)
+    if not c:raise HTTPException(404,'Crop not found')
+    if c.status!='approved':raise HTTPException(400,'Only a published crop can be removed from the marketplace')
+    reason=data.reason.strip()
+    c.status='removed';c.admin_note=f'Removed from marketplace by admin. Reason: {reason}'
+    notify(db,c.farmer_id,'Crop removed from marketplace',f'{c.name} was removed from the buyer marketplace by admin. Reason: {reason}')
+    db.commit();emit({'type':'crop_removed','crop_id':c.id});return crop_private(c,db)
+@app.delete('/api/admin/crops/{crop_id}')
+def remove_market_crop(crop_id:int,db:Session=Depends(get_db),admin:User=Depends(require_role('superadmin'))):
+    c=db.get(Crop,crop_id)
+    if not c:raise HTTPException(404,'Crop not found')
+    if c.status!='approved':raise HTTPException(400,'Only a published crop can be removed from the marketplace')
+    c.status='removed';c.admin_note='Removed from marketplace by admin.'
+    notify(db,c.farmer_id,'Crop removed from marketplace',f'{c.name} was removed from the buyer marketplace by admin.')
+    db.commit();emit({'type':'crop_removed','crop_id':c.id});return {'ok':True}
+@app.get('/api/admin/bookings')
+def admin_bookings(db:Session=Depends(get_db),admin:User=Depends(require_role('superadmin'))):return [booking_dict(b,db,True) for b in db.query(Booking).order_by(Booking.id.desc()).all()]
+@app.patch('/api/admin/bookings/{booking_id}/status')
+def admin_status(booking_id:int,data:StatusUpdate,db:Session=Depends(get_db),admin:User=Depends(require_role('superadmin'))):
+    b=db.get(Booking,booking_id);c=db.get(Crop,b.crop_id) if b else None
+    if not b or not c: raise HTTPException(404,'Order not found')
+    if data.status=='admin_cancelled':
+        if b.status in {'delivered','admin_cancelled','buyer_cancelled','farmer_rejected'}: raise HTTPException(400,'This order can no longer be cancelled')
+        c.available_kg=round(c.available_kg+b.quantity_kg,2);b.status='admin_cancelled';b.farmer_note=(data.reason or 'Order cancelled by admin.').strip()[:500]
+        notify(db,b.buyer_id,'Order cancelled',f'Order #{b.id} was cancelled by admin. {b.farmer_note}')
+        notify(db,c.farmer_id,'Order cancelled',f'Order #{b.id} was cancelled by admin. {b.farmer_note}')
+    elif data.status=='farmer_accepted':
+        if b.status!='farmer_pending_admin': raise HTTPException(400,'Farmer must accept the order before admin confirmation')
+        b.status='farmer_accepted';b.farmer_note='Farmer and admin confirmed the order.'
+        notify(db,b.buyer_id,'Order accepted',f'Order #{b.id} is accepted. Our admin team will contact you.')
+    else:
+        if data.status=='delivered':
+            raise HTTPException(400,'Delivery can only be completed after verifying the buyer delivery OTP')
+        allowed={'processing':['farmer_accepted','confirmed'],'shipped':['processing']}
+        if b.status not in allowed.get(data.status,[]): raise HTTPException(400,'Invalid order transition')
+        b.status=data.status
+        if data.status=='shipped':
+            b.delivery_otp=f'{secrets.randbelow(1000000):06d}'
+            notify(db,b.buyer_id,'Delivery OTP',f'Your order #{b.id} is out for delivery. Delivery OTP: {b.delivery_otp}. Share this OTP with admin only after you receive the order.')
+        else:
+            notify(db,b.buyer_id,'Order status updated',f'Order #{b.id} is now {data.status.replace("_"," ").title()}.')
+    db.commit();emit({'type':'admin_order_update','booking_id':b.id,'status':b.status});return booking_dict(b,db,True)
+@app.post('/api/admin/bookings/{bid}/verify-delivery-otp')
+def admin_verify_delivery_otp(bid:int,data:DeliveryOtpVerify,db:Session=Depends(get_db),admin:User=Depends(require_role('superadmin'))):
+    b=db.get(Booking,bid)
+    if not b: raise HTTPException(404,'Order not found')
+    if b.status!='shipped': raise HTTPException(400,'Order must be shipped before delivery OTP verification')
+    if not b.delivery_otp or not hmac.compare_digest(str(b.delivery_otp),str(data.otp)):
+        raise HTTPException(400,'Invalid delivery OTP')
+    b.status='delivered';b.delivered_at=datetime.utcnow();b.delivery_otp=None
+    notify(db,b.buyer_id,'Order delivered',f'Order #{b.id} has been delivered successfully.')
+    c=db.get(Crop,b.crop_id)
+    if c: notify(db,c.farmer_id,'Order delivered',f'Order #{b.id} for {c.name} has been delivered successfully.')
+    db.commit();emit({'type':'order_status','booking_id':b.id,'status':'delivered'})
+    return {'ok':True,'status':'delivered'}
+
+@app.get('/api/admin/vendors')
+def vendors(db:Session=Depends(get_db),admin:User=Depends(require_role('superadmin'))):
+    out=[]
+    accepted_statuses={'farmer_pending_admin','farmer_accepted','processing','confirmed','shipped','delivered'}
+    for v in db.query(User).filter(User.role=='vendor').all():
+        crops=db.query(Crop).filter(Crop.farmer_id==v.id).all();ids=[c.id for c in crops];all_orders=db.query(Booking).filter(Booking.crop_id.in_(ids)).all() if ids else [];orders=[x for x in all_orders if x.status in accepted_statuses]
+        out.append({'id':v.id,'name':v.name,'phone':v.phone,'crops':len(crops),'accepted_orders':len(orders),'revenue':sum(x.amount for x in orders)})
+    return out
+@app.get('/api/admin/analytics')
+def analytics(db:Session=Depends(get_db),admin:User=Depends(require_role('superadmin'))):
+    paid=db.query(Booking).filter(Booking.payment_status=='paid').all();by={};daily={}
+    for b in paid:
+        name=db.get(Crop,b.crop_id).name if db.get(Crop,b.crop_id) else 'Unknown';by[name]=by.get(name,0)+b.amount;key=(b.created_at or datetime.utcnow()).strftime('%Y-%m-%d');daily[key]=daily.get(key,0)+b.amount
+    low=[{'id':c.id,'name':c.name,'available_kg':c.available_kg} for c in db.query(Crop).filter(Crop.status=='approved').all() if c.available_kg<10]
+    return {'total_revenue':sum(x.amount for x in paid),'paid_orders':len(paid),'top_crops':[{'name':k,'revenue':v} for k,v in sorted(by.items(),key=lambda x:x[1],reverse=True)[:8]],'daily_sales':[{'date':k,'revenue':v} for k,v in sorted(daily.items())],'low_stock':low}
+@app.websocket('/ws/admin')
+async def ws_admin(ws:WebSocket):
+    await manager.connect(ws)
+    try:
+        while True:await ws.receive_text()
+    except WebSocketDisconnect:manager.disconnect(ws)
+    except Exception:manager.disconnect(ws)
