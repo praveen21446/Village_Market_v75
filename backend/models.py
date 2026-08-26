@@ -1,10 +1,8 @@
 from datetime import datetime
-from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Integer, String, Text
 from .database import Base
 class User(Base):
-    __tablename__='users'
-    __table_args__=(UniqueConstraint('phone','role',name='uq_users_phone_role'),)
-    id=Column(Integer,primary_key=True); phone=Column(String(30),index=True,nullable=False); email=Column(String(180),nullable=True); name=Column(String(100),nullable=False); role=Column(String(20),nullable=False); verified=Column(Boolean,default=True); created_at=Column(DateTime,default=datetime.utcnow)
+    __tablename__='users'; id=Column(Integer,primary_key=True); phone=Column(String(30),unique=True,index=True,nullable=False); email=Column(String(180),nullable=True); name=Column(String(100),nullable=False); role=Column(String(20),nullable=False); verified=Column(Boolean,default=True); created_at=Column(DateTime,default=datetime.utcnow)
 
 class AdminAccount(Base):
     __tablename__='admin_accounts'; id=Column(Integer,primary_key=True); admin_id=Column(String(80),unique=True,index=True,nullable=False); display_name=Column(String(100),nullable=False); password_hash=Column(String(255),nullable=False); user_id=Column(Integer,ForeignKey('users.id'),unique=True,nullable=False); created_by_user_id=Column(Integer,ForeignKey('users.id'),nullable=True); active=Column(Boolean,default=True,nullable=False); created_at=Column(DateTime,default=datetime.utcnow)
@@ -12,7 +10,7 @@ class AdminAccount(Base):
 class OtpCode(Base):
     __tablename__='otp_codes'; id=Column(Integer,primary_key=True); phone=Column(String(30),index=True,nullable=False); code=Column(String(6),nullable=False); expires_at=Column(DateTime,nullable=False)
 class Session(Base):
-    __tablename__='sessions'; token=Column(String(64),primary_key=True); user_id=Column(Integer,ForeignKey('users.id'),nullable=False); expires_at=Column(DateTime,nullable=False)
+    __tablename__='sessions'; token=Column(String(64),primary_key=True); user_id=Column(Integer,ForeignKey('users.id'),nullable=False); role=Column(String(20),nullable=True); expires_at=Column(DateTime,nullable=False)
 class Crop(Base):
     __tablename__='crops'; id=Column(Integer,primary_key=True); farmer_id=Column(Integer,ForeignKey('users.id'),nullable=False); name=Column(String(100),nullable=False); category=Column(String(40),nullable=False); quantity_kg=Column(Float,nullable=False); available_kg=Column(Float,nullable=False); location=Column(String(240),nullable=False); address_line=Column(String(240)); village=Column(String(100)); mandal=Column(String(100)); district=Column(String(100)); state=Column(String(100)); pincode=Column(String(10)); landmark=Column(String(180)); latitude=Column(String(30)); longitude=Column(String(30)); expected_price=Column(Float,nullable=False); quality=Column(String(50),nullable=False); harvest_date=Column(String(20),nullable=False); details=Column(Text,default=''); photo=Column(String(255)); status=Column(String(20),default='pending'); market_price=Column(Float); admin_note=Column(Text,default=''); low_stock_threshold=Column(Float,default=10); created_at=Column(DateTime,default=datetime.utcnow)
 class Booking(Base):

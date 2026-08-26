@@ -6,10 +6,10 @@ from fastapi import Depends,FastAPI,File,Form,HTTPException,UploadFile,WebSocket
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
-from .auth import admin_credentials,current_user,require_role,send_otp,verify_otp
+from .auth import admin_credentials,create_verified_session,current_user,require_role,send_otp,verify_otp
 from .database import SessionLocal,get_db
 from .models import AdminAccount,Booking,Crop,Notification,Review,SavedAddress,SupportMessage,SupportTicket,User
-from .schemas import AddressSave,AdminCreate,AdminLogin,Approval,BookingCreate,CartCheckout,CropRemoval,Decision,NotificationMark,ReviewCreate,SendOtp,StatusUpdate,StockUpdate,VerifyOtp,DeliveryOtpVerify,SupportMessageCreate,SupportStatusUpdate,AdminCropEdit,SupportTicketCreate
+from .schemas import AddressSave,AdminCreate,AdminLogin,Approval,BookingCreate,CartCheckout,CropRemoval,Decision,NotificationMark,ReviewCreate,SendOtp,StatusUpdate,StockUpdate,VerifyOtp,DeliveryOtpVerify,SupportMessageCreate,SupportStatusUpdate,SupportTicketCreate,AdminCropEdit,Msg91Login
 ROOT=Path(__file__).resolve().parents[1];UPLOADS=ROOT/'uploads';UPLOADS.mkdir(exist_ok=True);FRONTEND=ROOT/'frontend'
 app=FastAPI(title='Village Market API',version='2.0')
 @app.middleware('http')
@@ -101,11 +101,86 @@ def address_dict(a):
 def home():return FileResponse(FRONTEND/'index.html')
 @app.get('/admin',include_in_schema=False)
 def admin_home():return FileResponse(FRONTEND/'admin.html')
+def _public_msg91_config():
+    return {
+        'widget_id': os.getenv('MSG91_WIDGET_ID','').strip(),
+        'client_token': os.getenv('MSG91_WIDGET_TOKEN','').strip(),
+        'configured': bool(os.getenv('MSG91_WIDGET_ID','').strip() and os.getenv('MSG91_WIDGET_TOKEN','').strip()),
+    }
+
+def _digits(value):
+    return ''.join(ch for ch in str(value or '') if ch.isdigit())
+
+def _msg91_identifiers(obj):
+    """Collect phone-like identifiers from a nested MSG91 response."""
+    found=set()
+    phone_keys={'identifier','mobile','phone','phone_number','phonenumber','number','user','username'}
+    def walk(value,key=''):
+        if isinstance(value,dict):
+            for k,v in value.items(): walk(v,str(k).lower().replace('-','_'))
+        elif isinstance(value,list):
+            for v in value: walk(v,key)
+        elif key.replace('_','') in {x.replace('_','') for x in phone_keys}:
+            d=_digits(value)
+            if len(d)>=10: found.add(d)
+    walk(obj)
+    return found
+
+def _jwt_payload(token):
+    try:
+        parts=token.split('.')
+        if len(parts)<2:return {}
+        raw=parts[1]+'='*(-len(parts[1])%4)
+        return json.loads(base64.urlsafe_b64decode(raw.encode()).decode())
+    except Exception:return {}
+
+async def _verify_msg91_token(access_token,phone):
+    authkey=os.getenv('MSG91_AUTH_KEY','').strip()
+    if not authkey: raise HTTPException(503,'Real OTP is not configured on the server')
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            r=await client.post('https://control.msg91.com/api/v5/widget/verifyAccessToken',json={'authkey':authkey,'access-token':access_token},headers={'Content-Type':'application/json'})
+        try: data=r.json()
+        except Exception: data={}
+    except httpx.RequestError:
+        raise HTTPException(502,'Could not contact OTP verification service')
+    if r.status_code!=200:
+        raise HTTPException(401,'OTP verification failed')
+    marker=' '.join(str(data.get(k,'')) for k in ('type','status','message')).lower() if isinstance(data,dict) else ''
+    if any(x in marker for x in ('fail','invalid','error','unauthor')):
+        raise HTTPException(401,'Invalid or expired OTP verification')
+    expected='91'+phone
+    ids=_msg91_identifiers(data)|_msg91_identifiers(_jwt_payload(access_token))
+    normalized=set()
+    for value in ids:
+        d=_digits(value)
+        if len(d)==10: normalized.add('91'+d)
+        elif len(d)>=12: normalized.add(d[-12:])
+    if expected not in normalized:
+        raise HTTPException(401,'Verified mobile number does not match the login number')
+    return data
+
+@app.get('/api/auth/msg91-config')
+def msg91_config():
+    return _public_msg91_config()
+
+@app.post('/api/auth/msg91-login')
+async def msg91_login(data:Msg91Login,db:Session=Depends(get_db)):
+    await _verify_msg91_token(data.access_token,data.phone)
+    tok,u=create_verified_session(data.phone,data.role,data.name,data.email,db)
+    active=getattr(u,'active_role',u.role)
+    return {'token':tok,'user':{'id':u.id,'name':u.name,'phone':u.phone,'email':u.email,'role':active}}
+
 @app.post('/api/auth/send-otp')
-def sendotp(data:SendOtp,db:Session=Depends(get_db)):return {'message':'OTP generated','demo_otp':send_otp(data.phone,db)}
+def sendotp(data:SendOtp,db:Session=Depends(get_db)):
+    if os.getenv('APP_ENV','development').lower()=='production':
+        raise HTTPException(410,'Demo OTP is disabled. Use MSG91 real OTP.')
+    return {'message':'OTP generated','demo_otp':send_otp(data.phone,db)}
 @app.post('/api/auth/verify-otp')
 def verifyotp(data:VerifyOtp,db:Session=Depends(get_db)):
-    tok,u=verify_otp(data.phone,data.code,data.role,data.name,data.email,db);return {'token':tok,'user':{'id':u.id,'name':u.name,'phone':u.phone,'email':u.email,'role':u.role}}
+    if os.getenv('APP_ENV','development').lower()=='production':
+        raise HTTPException(410,'Demo OTP is disabled. Use MSG91 real OTP.')
+    tok,u=verify_otp(data.phone,data.code,data.role,data.name,data.email,db);active=getattr(u,'active_role',u.role);return {'token':tok,'user':{'id':u.id,'name':u.name,'phone':u.phone,'email':u.email,'role':active}}
 def _hash_admin_password(password:str)->str:
     salt=secrets.token_bytes(16)
     digest=hashlib.pbkdf2_hmac('sha256',password.encode(),salt,200000)
@@ -171,7 +246,9 @@ def delete_admin(admin_account_id:int,db:Session=Depends(get_db),admin:User=Depe
     if u:db.delete(u)
     db.commit();return {'ok':True}
 @app.get('/api/me')
-def me(user:User=Depends(current_user)):return {'id':user.id,'name':user.name,'email':user.email,'phone':user.phone,'role':user.role,'display_role':{'customer':'buyer','vendor':'farmer','superadmin':'admin'}.get(user.role,user.role)}
+def me(user:User=Depends(current_user)):
+    active=getattr(user,'active_role',user.role)
+    return {'id':user.id,'name':user.name,'email':user.email,'phone':user.phone,'role':active,'display_role':{'customer':'buyer','vendor':'farmer','superadmin':'admin'}.get(active,active)}
 @app.get('/api/addresses')
 def saved_addresses(kind:str,db:Session=Depends(get_db),user:User=Depends(current_user)):
     if kind not in {'delivery','farm'}: raise HTTPException(400,'Invalid address type')
@@ -335,7 +412,7 @@ def support_tickets(db:Session=Depends(get_db),user:User=Depends(current_user)):
 def create_support_ticket(data:SupportTicketCreate,db:Session=Depends(get_db),user:User=Depends(current_user)):
     ticket=SupportTicket(user_id=user.id,subject=data.subject.strip(),category=data.category,status='open')
     db.add(ticket);db.flush()
-    db.add(SupportMessage(ticket_id=ticket.id,sender_user_id=user.id,sender_role=({'customer':'buyer','vendor':'farmer'}.get(user.role,user.role)),message=data.message.strip()))
+    db.add(SupportMessage(ticket_id=ticket.id,sender_user_id=user.id,sender_role=({'customer':'buyer','vendor':'farmer'}.get(getattr(user,'active_role',user.role),getattr(user,'active_role',user.role))),message=data.message.strip()))
     notify_admins(db,'New live support request',f'{user.name} opened support ticket #{ticket.id}: {ticket.subject}')
     db.commit();db.refresh(ticket);emit({'type':'support_update','ticket_id':ticket.id})
     return support_ticket_dict(ticket,db,True)
@@ -345,7 +422,7 @@ def user_support_message(ticket_id:int,data:SupportMessageCreate,db:Session=Depe
     ticket=db.query(SupportTicket).filter(SupportTicket.id==ticket_id,SupportTicket.user_id==user.id).first()
     if not ticket: raise HTTPException(404,'Support ticket not found')
     if ticket.status=='closed': raise HTTPException(400,'This support ticket is closed')
-    db.add(SupportMessage(ticket_id=ticket.id,sender_user_id=user.id,sender_role=({'customer':'buyer','vendor':'farmer'}.get(user.role,user.role)),message=data.message.strip()))
+    db.add(SupportMessage(ticket_id=ticket.id,sender_user_id=user.id,sender_role=({'customer':'buyer','vendor':'farmer'}.get(getattr(user,'active_role',user.role),getattr(user,'active_role',user.role))),message=data.message.strip()))
     ticket.updated_at=datetime.utcnow();notify_admins(db,'Live support message',f'New message on support ticket #{ticket.id}.')
     db.commit();emit({'type':'support_update','ticket_id':ticket.id})
     return support_ticket_dict(ticket,db,True)
@@ -392,35 +469,19 @@ def admin_crop(crop_id:int,data:Approval,db:Session=Depends(get_db),admin:User=D
     if q<10 or q>c.quantity_kg:raise HTTPException(400,'Verified quantity must be at least 10 kg and cannot exceed submitted quantity')
     if not data.market_price or data.market_price<=0:raise HTTPException(400,'Final price is required')
     c.quantity_kg=round(q,2);c.available_kg=round(q,2);c.quality=(data.inspected_quality or c.quality).strip();c.market_price=round(data.market_price,2);c.status='approved';c.admin_note=data.admin_note or '';notify(db,c.farmer_id,'Crop approved',f'{c.name} approved at ₹{c.market_price:g}/kg.');db.commit();emit({'type':'crop_approved','crop_id':c.id});return crop_private(c,db)
+@app.patch('/api/admin/crops/{crop_id}/edit')
+def edit_published_crop(crop_id:int,data:AdminCropEdit,db:Session=Depends(get_db),admin:User=Depends(require_role('superadmin'))):
+    c=db.get(Crop,crop_id)
+    if not c: raise HTTPException(404,'Crop not found')
+    if c.status!='approved': raise HTTPException(400,'Only a published crop can be edited here')
+    c.name=data.name.strip();c.category=data.category.strip();c.quality=data.quality.strip();c.harvest_date=data.harvest_date.strip();c.details=data.details.strip()
+    c.available_kg=round(data.available_kg,2);c.quantity_kg=max(c.quantity_kg,c.available_kg);c.market_price=round(data.market_price,2)
+    c.admin_note=data.admin_note.strip() or f'Market details updated by admin on {datetime.utcnow().date().isoformat()}.'
+    notify(db,c.farmer_id,'Crop details updated',f'{c.name} marketplace details were updated by admin. Current price: ₹{c.market_price:g}/kg.')
+    db.commit();emit({'type':'crop_updated','crop_id':c.id,'market_price':c.market_price});return crop_private(c,db)
 @app.get('/api/admin/crops/published')
 def published_crops(db:Session=Depends(get_db),admin:User=Depends(require_role('superadmin'))):
     return [crop_private(c,db) for c in db.query(Crop).filter(Crop.status=='approved').order_by(Crop.id.desc()).all()]
-@app.patch('/api/admin/crops/{crop_id}/edit')
-def admin_edit_crop(crop_id:int,data:AdminCropEdit,db:Session=Depends(get_db),admin:User=Depends(require_role('superadmin'))):
-    c=db.get(Crop,crop_id)
-    if not c: raise HTTPException(404,'Crop not found')
-    updates=data.model_dump(exclude_unset=True)
-    if not updates: raise HTTPException(400,'No crop changes were provided')
-    old_market=c.market_price
-    old_total=float(c.quantity_kg or 0); old_available=float(c.available_kg or 0)
-    sold=max(0.0,old_total-old_available)
-    if 'quantity_kg' in updates:
-        new_total=round(float(updates.pop('quantity_kg')),2)
-        if new_total < sold: raise HTTPException(400,f'Quantity cannot be below {sold:g} kg because that amount has already been ordered')
-        c.quantity_kg=new_total;c.available_kg=round(max(0,new_total-sold),2)
-    for field in ('name','category','quality','harvest_date','details','admin_note'):
-        if field in updates:
-            value=updates.pop(field)
-            setattr(c,field,value.strip() if isinstance(value,str) else value)
-    if 'expected_price' in updates: c.expected_price=round(float(updates.pop('expected_price')),2)
-    if 'market_price' in updates: c.market_price=round(float(updates.pop('market_price')),2)
-    if c.status=='approved' and (c.market_price is None or c.market_price<=0): raise HTTPException(400,'Published crops require a valid market price')
-    note='Crop details updated by admin.'
-    if old_market!=c.market_price and c.market_price:
-        note=f'Market price updated from ₹{old_market:g}/kg to ₹{c.market_price:g}/kg.' if old_market else f'Market price set to ₹{c.market_price:g}/kg.'
-    notify(db,c.farmer_id,'Crop updated by admin',f'{c.name}: {note}')
-    db.commit();emit({'type':'crop_updated','crop_id':c.id});return crop_private(c,db)
-
 @app.patch('/api/admin/crops/{crop_id}/remove')
 def remove_market_crop_page(crop_id:int,data:CropRemoval,db:Session=Depends(get_db),admin:User=Depends(require_role('superadmin'))):
     c=db.get(Crop,crop_id)
@@ -483,7 +544,8 @@ def admin_verify_delivery_otp(bid:int,data:DeliveryOtpVerify,db:Session=Depends(
 def vendors(db:Session=Depends(get_db),admin:User=Depends(require_role('superadmin'))):
     out=[]
     accepted_statuses={'farmer_pending_admin','farmer_accepted','processing','confirmed','shipped','delivered'}
-    for v in db.query(User).filter(User.role=='vendor').all():
+    farmer_ids=[row[0] for row in db.query(Crop.farmer_id).distinct().all()]
+    for v in db.query(User).filter(User.id.in_(farmer_ids)).all() if farmer_ids else []:
         crops=db.query(Crop).filter(Crop.farmer_id==v.id).all();ids=[c.id for c in crops];all_orders=db.query(Booking).filter(Booking.crop_id.in_(ids)).all() if ids else [];orders=[x for x in all_orders if x.status in accepted_statuses]
         out.append({'id':v.id,'name':v.name,'phone':v.phone,'crops':len(crops),'accepted_orders':len(orders),'revenue':sum(x.amount for x in orders)})
     return out

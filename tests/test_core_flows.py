@@ -11,12 +11,14 @@ except FileNotFoundError:
 os.environ["DATABASE_URL"] = f"sqlite:///{TEST_DB.as_posix()}"
 os.environ["ADMIN_ID"] = "admin"
 os.environ["ADMIN_PASSWORD"] = "looser@123"
+os.environ["APP_ENV"] = "test"
 
 from fastapi.testclient import TestClient
 from backend.database import Base, SessionLocal, engine
 from backend import models  # register ORM tables for the isolated test database
 Base.metadata.create_all(engine)
 from backend.main import app
+import backend.main as main_module
 from backend.models import Booking, Crop
 
 client = TestClient(app)
@@ -410,16 +412,24 @@ def test_admin_can_create_and_remove_other_admin():
     assert client.get("/api/admin/pending", headers=headers(added_token)).status_code == 401
 
 
-def test_same_phone_can_use_buyer_and_farmer_roles():
+def test_same_phone_can_login_as_buyer_and_farmer_with_separate_sessions():
     phone = "9111111111"
     buyer_token = otp_login(phone, "buyer", "Dual Role User")
-    farmer_token = otp_login(phone, "farmer", "Dual Role User")
-    buyer_me = client.get('/api/me', headers=headers(buyer_token))
-    farmer_me = client.get('/api/me', headers=headers(farmer_token))
-    assert buyer_me.status_code == 200 and buyer_me.json()['role'] == 'customer'
-    assert farmer_me.status_code == 200 and farmer_me.json()['role'] == 'vendor'
-    assert buyer_me.json()['phone'] == farmer_me.json()['phone'] == phone
-    assert buyer_me.json()['id'] != farmer_me.json()['id']
+    assert client.get('/api/me', headers=headers(buyer_token)).json()['role'] == 'customer'
+
+    r = client.post('/api/auth/send-otp', json={'phone': phone})
+    assert r.status_code == 200
+    otp = r.json()['demo_otp']
+    r = client.post('/api/auth/verify-otp', json={
+        'phone': phone, 'code': otp, 'role': 'farmer', 'name': 'Dual Role User', 'email': None
+    })
+    assert r.status_code == 200, r.text
+    farmer_token = r.json()['token']
+    assert r.json()['user']['role'] == 'vendor'
+    assert client.get('/api/me', headers=headers(farmer_token)).json()['role'] == 'vendor'
+    # The original buyer session remains a buyer session.
+    assert client.get('/api/me', headers=headers(buyer_token)).json()['role'] == 'customer'
+
 
 def test_frontend_cache_and_removed_demo_defaults():
     home = client.get('/')
@@ -427,20 +437,11 @@ def test_frontend_cache_and_removed_demo_defaults():
     html = home.text
     assert 'Demo Buyer' not in html
     assert '9999999999' not in html
-    assert '?v=75' in html
+    assert '?v=76' in html
     js = client.get('/static/app.js')
     assert js.status_code == 200
     assert 'no-store' in js.headers.get('cache-control','')
     assert "prompt(t('How many kg do you want to add?'),'10')" not in js.text
-
-
-def test_v75_admin_crop_edit_and_mobile_alignment_assets():
-    admin_js = client.get('/static/admin.js').text
-    css = client.get('/static/style.css').text
-    assert 'editMarketCropPage' in admin_js
-    assert '/edit' in admin_js
-    assert 'v75 — mobile alignment cleanup' in css
-    assert 'grid-template-columns:40px minmax(0,1fr) 40px 22px' in css
 
 
 def test_cart_badge_counts_items_and_buyer_orders_split():
@@ -452,6 +453,45 @@ def test_cart_badge_counts_items_and_buyer_orders_split():
     assert "rows.filter(b=>b.status!=='delivered')" in js
     assert "rows.filter(b=>b.status==='delivered')" in js
 
+
+
+def test_msg91_public_config_and_verified_dual_role_login(monkeypatch):
+    monkeypatch.setenv("MSG91_WIDGET_ID", "widget-test-id")
+    monkeypatch.setenv("MSG91_WIDGET_TOKEN", "client-test-token")
+    monkeypatch.setenv("MSG91_AUTH_KEY", "server-secret-must-not-leak")
+    cfg = client.get("/api/auth/msg91-config")
+    assert cfg.status_code == 200
+    assert cfg.json() == {"widget_id":"widget-test-id","client_token":"client-test-token","configured":True}
+    assert "server-secret-must-not-leak" not in cfg.text
+
+    async def fake_verify(access_token, phone):
+        assert access_token == "x" * 40
+        assert phone == "9222222222"
+        return {"type":"success","identifier":"919222222222"}
+
+    monkeypatch.setattr(main_module, "_verify_msg91_token", fake_verify)
+    r = client.post("/api/auth/msg91-login", json={
+        "phone":"9222222222", "access_token":"x"*40, "role":"buyer",
+        "name":"Real OTP User", "email":None
+    })
+    assert r.status_code == 200, r.text
+    buyer_token=r.json()["token"]
+    assert r.json()["user"]["role"] == "customer"
+
+    r = client.post("/api/auth/msg91-login", json={
+        "phone":"9222222222", "access_token":"x"*40, "role":"farmer",
+        "name":"Real OTP User", "email":None
+    })
+    assert r.status_code == 200, r.text
+    assert r.json()["user"]["role"] == "vendor"
+    assert client.get('/api/me', headers=headers(buyer_token)).json()['role'] == 'customer'
+
+
+def test_demo_otp_endpoints_disabled_in_production(monkeypatch):
+    monkeypatch.setenv("APP_ENV", "production")
+    r=client.post('/api/auth/send-otp',json={'phone':'9333333333'})
+    assert r.status_code == 410
+    assert 'MSG91' in r.text
 
 def test_live_support_buyer_admin_flow():
     buyer = otp_login("9000000091", "buyer", "Support Buyer")
