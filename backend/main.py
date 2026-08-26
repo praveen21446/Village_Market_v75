@@ -149,14 +149,19 @@ async def _verify_msg91_token(access_token,phone):
     marker=' '.join(str(data.get(k,'')) for k in ('type','status','message')).lower() if isinstance(data,dict) else ''
     if any(x in marker for x in ('fail','invalid','error','unauthor')):
         raise HTTPException(401,'Invalid or expired OTP verification')
-    expected='91'+phone
-    ids=_msg91_identifiers(data)|_msg91_identifiers(_jwt_payload(access_token))
-    normalized=set()
-    for value in ids:
-        d=_digits(value)
-        if len(d)==10: normalized.add('91'+d)
-        elif len(d)>=12: normalized.add(d[-12:])
-    if expected not in normalized:
+    # MSG91 can represent the same verified Indian number as 10 digits,
+    # 91XXXXXXXXXX, +91XXXXXXXXXX, or inside different nested response fields.
+    # Bind the verified token to the login phone using the canonical last 10 digits.
+    expected10=_digits(phone)[-10:]
+    def contains_verified_phone(obj):
+        if isinstance(obj,dict):
+            return any(contains_verified_phone(v) for v in obj.values())
+        if isinstance(obj,list):
+            return any(contains_verified_phone(v) for v in obj)
+        d=_digits(obj)
+        return len(d)>=10 and d[-10:]==expected10
+    payload=_jwt_payload(access_token)
+    if not (contains_verified_phone(data) or contains_verified_phone(payload)):
         raise HTTPException(401,'Verified mobile number does not match the login number')
     return data
 
