@@ -88,7 +88,6 @@ $$('#roles button').forEach(b=>b.onclick=()=>{$$('#roles button').forEach(x=>x.c
 function setLoginLoading(on,targetRole=role){const overlay=$('#loginLoading'),btn=$('#loginButton'),text=$('#loginLoadingText');if(overlay)overlay.hidden=!on;if(btn){btn.disabled=on;btn.textContent=on?t('Signing in…'):($('#otpBox')&&!$('#otpBox').hidden?t('Verify & sign in'):t('Get OTP'))}if(text)text.textContent=targetRole==='farmer'?t('Verifying OTP and opening Add Crop…'):t('Verifying OTP and opening Marketplace…')}
 async function sendMsg91Otp(phone){
   if(!msg91Ready||typeof window.sendOtp!=='function')throw new Error('OTP service is still loading. Please try again in a few seconds.');
-  if(typeof window.isCaptchaVerified==='function'&&!window.isCaptchaVerified())throw new Error('Please complete the CAPTCHA first.');
   return await new Promise((resolve,reject)=>window.sendOtp('91'+phone,d=>resolve(d),e=>reject(new Error(e?.message||e?.error||'Unable to send OTP'))));
 }
 async function verifyMsg91Otp(code){
