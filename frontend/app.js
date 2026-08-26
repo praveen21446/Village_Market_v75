@@ -79,8 +79,8 @@ async function initMsg91(){
   try{
     const r=await fetch('/api/auth/msg91-config',{cache:'no-store'});msg91Config=await r.json();
     if(!msg91Config?.configured){console.warn('MSG91 widget variables are not configured');return}
-    window.vmMsg91Configuration={widgetId:msg91Config.widget_id,tokenAuth:msg91Config.client_token,exposeMethods:true,captchaRenderId:'msg91Captcha'};
-    const script=document.createElement('script');script.src='https://verify.msg91.com/otp-provider.js';script.async=true;script.onload=()=>{try{window.initSendOTP(window.vmMsg91Configuration);msg91Ready=true}catch(e){console.error('MSG91 init failed',e)}};script.onerror=()=>console.error('MSG91 SDK failed to load');document.head.appendChild(script)
+    window.vmMsg91Configuration={widgetId:msg91Config.widget_id,tokenAuth:msg91Config.client_token,exposeMethods:true,captchaRenderId:'msg91Captcha',success:(data)=>{console.log('MSG91 OTP success',data)},failure:(error)=>{console.error('MSG91 OTP failure',error)}};
+    const script=document.createElement('script');script.src='https://verify.msg91.com/otp-provider.js';script.async=true;script.onload=()=>{try{window.initSendOTP(window.vmMsg91Configuration);let tries=0;const readyTimer=setInterval(()=>{tries++;if(typeof window.sendOtp==='function'&&typeof window.verifyOtp==='function'){msg91Ready=true;clearInterval(readyTimer);console.log('MSG91 OTP service ready')}else if(tries>=50){clearInterval(readyTimer);console.error('MSG91 initialized but OTP methods were not exposed')}},100)}catch(e){msg91Ready=false;console.error('MSG91 init failed',e)}};script.onerror=()=>console.error('MSG91 SDK failed to load');document.head.appendChild(script)
   }catch(e){console.error('MSG91 config failed',e)}
 }
 function resetOtpLogin(){msg91ReqId=null;$('#otpBox').hidden=true;$('#otp').value='';$('#otpHint').textContent='';$('#loginButton').textContent=t('Get OTP');clearInterval(resendTimer)}

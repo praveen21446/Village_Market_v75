@@ -437,7 +437,7 @@ def test_frontend_cache_and_removed_demo_defaults():
     html = home.text
     assert 'Demo Buyer' not in html
     assert '9999999999' not in html
-    assert '?v=76' in html
+    assert '?v=77' in html
     js = client.get('/static/app.js')
     assert js.status_code == 200
     assert 'no-store' in js.headers.get('cache-control','')
