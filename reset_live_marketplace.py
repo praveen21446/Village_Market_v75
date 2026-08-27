@@ -101,10 +101,28 @@ def main():
         if missing:
             print("ERROR: expected Village Market tables missing:",", ".join(sorted(missing))); return 2
 
-        admins=conn.execute(text("""SELECT u.id,u.name,u.phone,a.admin_id,a.active
-            FROM users u JOIN admin_accounts a ON a.user_id=u.id ORDER BY a.id""")).mappings().all()
-        if not admins:
-            print("REFUSED: no admin_accounts were found. Reset would leave no admin login."); return 2
+        # Primary admin is configured through Railway ADMIN_ID/ADMIN_PASSWORD and may
+        # exist only as a users.role='superadmin' row, without an admin_accounts row.
+        # Secondary admins are stored in admin_accounts. Preserve BOTH forms.
+        admins=conn.execute(text("""
+            SELECT
+                u.id,
+                u.name,
+                u.phone,
+                u.role,
+                a.admin_id,
+                a.active
+            FROM users u
+            LEFT JOIN admin_accounts a ON a.user_id=u.id
+            WHERE u.role='superadmin' OR a.user_id IS NOT NULL
+            ORDER BY u.id
+        """)).mappings().all()
+
+        configured_primary_id=os.getenv("ADMIN_ID","").strip()
+        configured_primary_password=os.getenv("ADMIN_PASSWORD","")
+        if not admins and not (configured_primary_id and configured_primary_password):
+            print("REFUSED: no preserved superadmin user/admin account was found and primary ADMIN_ID/ADMIN_PASSWORD are not configured.")
+            return 2
 
         counts={}
         for table in ["users","admin_accounts","crops","bookings","reviews","saved_addresses",
@@ -114,8 +132,13 @@ def main():
 
         print("Database:",mask_db(db))
         print("Admins that WILL BE KEPT:")
-        for a in admins:
-            print(f"  user_id={a['id']} admin_id={a['admin_id']} name={a['name']} active={a['active']}")
+        if admins:
+            for a in admins:
+                admin_label=a["admin_id"] or configured_primary_id or "(primary superadmin)"
+                active=a["active"] if a["active"] is not None else True
+                print(f"  user_id={a['id']} admin_id={admin_label} name={a['name']} role={a['role']} active={active}")
+        else:
+            print(f"  Primary Railway admin will be recreated on next login: admin_id={configured_primary_id}")
         print("Current row counts:")
         for k,v in counts.items(): print(f"  {k}: {v}")
 
@@ -146,9 +169,8 @@ def main():
             failed=len(keys)
 
     admin_ids=[a["id"] for a in admins]
-    id_csv=",".join(str(int(x)) for x in admin_ids)
 
-    # FK-safe deletion. Keep admin user rows and admin_accounts.
+    # FK-safe deletion. Keep all superadmin user rows and all users referenced by admin_accounts.
     with engine.begin() as conn:
         def wipe(table):
             if table in tables: conn.execute(text(f'DELETE FROM "{table}"'))
@@ -161,8 +183,14 @@ def main():
         wipe("bookings")
         wipe("crops")
         wipe("otp_codes")
-        wipe("sessions")  # admin sessions intentionally cleared; admin credentials remain.
-        conn.execute(text(f"DELETE FROM users WHERE id NOT IN ({id_csv})"))
+        wipe("sessions")  # sessions are temporary; admin credentials/accounts remain.
+
+        # Keep primary superadmin users and secondary admin-account users.
+        conn.execute(text("""
+            DELETE FROM users
+            WHERE role <> 'superadmin'
+              AND id NOT IN (SELECT user_id FROM admin_accounts)
+        """))
 
     with engine.connect() as conn:
         remaining_users=conn.execute(text("SELECT COUNT(*) FROM users")).scalar_one()
@@ -171,8 +199,8 @@ def main():
         remaining_orders=conn.execute(text("SELECT COUNT(*) FROM bookings")).scalar_one()
 
     print("\nRESET COMPLETE")
-    print("Admin accounts kept:",remaining_admins)
-    print("User rows remaining (admins):",remaining_users)
+    print("Secondary admin_accounts kept:",remaining_admins)
+    print("Admin user rows remaining:",remaining_users)
     print("Crops:",remaining_crops)
     print("Bookings/orders:",remaining_orders)
     print(f"Referenced R2 crop images deleted: {deleted}; failed/skipped: {failed}")
