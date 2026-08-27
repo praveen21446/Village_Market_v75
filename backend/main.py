@@ -320,8 +320,8 @@ def crop_detail(crop_id:int,db:Session=Depends(get_db)):
     if not c or c.status!='approved' or c.available_kg<10 or not c.market_price or c.market_price<=0:raise HTTPException(404,'Crop not found')
     return crop_public(c,db)
 @app.post('/api/crops')
-def add_crop(name:str=Form(...),category:str=Form(...),quantity_kg:float=Form(...),location:str=Form(...),address_line:str=Form(''),village:str=Form(''),mandal:str=Form(''),district:str=Form(''),state:str=Form(''),pincode:str=Form(''),landmark:str=Form(''),latitude:str=Form(''),longitude:str=Form(''),expected_price:float=Form(...),quality:str=Form(...),harvest_date:str=Form(...),details:str=Form(...),photos:list[UploadFile]|None=File(None),photo:UploadFile|None=File(None),db:Session=Depends(get_db),farmer:User=Depends(require_role('vendor'))):
-    required_text={'name':name,'category':category,'quality':quality,'harvest_date':harvest_date,'details':details}
+def add_crop(name:str=Form(...),category:str=Form(...),quantity_kg:float=Form(...),location:str=Form(...),address_line:str=Form(''),village:str=Form(''),mandal:str=Form(''),district:str=Form(''),state:str=Form(''),pincode:str=Form(''),landmark:str=Form(''),latitude:str=Form(''),longitude:str=Form(''),expected_price:float=Form(...),quality:str=Form(...),harvest_date:str=Form(...),details:str=Form(''),photos:list[UploadFile]|None=File(None),photo:UploadFile|None=File(None),db:Session=Depends(get_db),farmer:User=Depends(require_role('vendor'))):
+    required_text={'name':name,'category':category,'quality':quality,'harvest_date':harvest_date}
     missing=[label for label,value in required_text.items() if not str(value).strip()]
     if missing:raise HTTPException(400,f"Required crop fields missing: {', '.join(missing)}")
     if quantity_kg<10 or expected_price<=0:raise HTTPException(400,'Quantity must be at least 10 kg and price must be positive')

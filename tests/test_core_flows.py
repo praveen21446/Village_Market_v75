@@ -597,3 +597,17 @@ def test_v83_language_coverage_and_force_reset_present():
     assert 'DELETE FROM bookings' in text
     assert 'DELETE FROM crops' in text
     assert 'DELETE FROM users' in text
+
+
+def test_v85_optional_details_editable_cart_and_error_banner_present():
+    root = Path(__file__).resolve().parents[1]
+    app_js = (root / "frontend" / "app.js").read_text(encoding="utf-8")
+    main_py = (root / "backend" / "main.py").read_text(encoding="utf-8")
+    css = (root / "frontend" / "style.css").read_text(encoding="utf-8")
+    assert "details:str=Form('')" in main_py
+    required_line = main_py.split("required_text=",1)[1].split("\n",1)[0]
+    assert "'details':details" not in required_line
+    assert "window.reviewCartSetQty" in app_js
+    assert "window.reviewCartRemove" in app_js
+    assert "showPageError(msg)" in app_js
+    assert "pageErrorBanner" in css
