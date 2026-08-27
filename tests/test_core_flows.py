@@ -528,3 +528,34 @@ def test_live_support_buyer_admin_flow():
     assert close.status_code == 200 and close.json()["status"] == "closed"
     blocked = client.post(f"/api/support/tickets/{ticket_id}/messages", headers=headers(buyer), json={"message":"hello"})
     assert blocked.status_code == 400
+
+def test_crop_requires_at_least_one_photo_and_accepts_multiple():
+    farmer = otp_login("9000000091", "farmer", "Photo Farmer")
+    data = {
+        "name": "Tomato",
+        "category": "Vegetables",
+        "quantity_kg": "50",
+        "location": "Photo Farm",
+        "village": "Test Village",
+        "mandal": "Test Mandal",
+        "district": "Kadapa",
+        "state": "Andhra Pradesh",
+        "pincode": "516001",
+        "expected_price": "25",
+        "quality": "Grade A",
+        "harvest_date": "2026-09-01",
+        "details": "Multiple image crop",
+    }
+    missing = client.post("/api/crops", headers=headers(farmer), data=data)
+    assert missing.status_code == 400
+    assert "At least 1 crop photo" in missing.text
+
+    files = [
+        ("photos", ("crop1.jpg", b"image-one", "image/jpeg")),
+        ("photos", ("crop2.png", b"image-two", "image/png")),
+    ]
+    result = client.post("/api/crops", headers=headers(farmer), data=data, files=files)
+    assert result.status_code == 200, result.text
+    body = result.json()
+    assert len(body["photos"]) == 2
+    assert body["photo"] == body["photos"][0]
