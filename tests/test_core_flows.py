@@ -591,7 +591,7 @@ def test_v83_language_coverage_and_force_reset_present():
     assert "${t('Delivered Orders')}" in app_js
     assert "${t('New buyer orders will appear here.')}" in app_js
     assert "const PAGE_I18N=" in app_js
-    assert "vm_fresh_reset_v83" in app_js
+    assert "vm_fresh_reset_v84" in app_js
     assert migration.exists()
     text = migration.read_text(encoding="utf-8")
     assert 'DELETE FROM bookings' in text
