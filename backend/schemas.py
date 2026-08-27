@@ -42,3 +42,9 @@ class AdminCropEdit(BaseModel):
     details:str=Field(default='',max_length=3000)
     market_price:float=Field(gt=0)
     admin_note:str=Field(default='',max_length=1000)
+
+
+class AdminUserEdit(BaseModel):
+    name:str=Field(min_length=2,max_length=100)
+    email:str|None=Field(default=None,max_length=180)
+    verified:bool=True

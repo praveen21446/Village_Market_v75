@@ -22,7 +22,7 @@ For a production launch, configure a private security contact email and replace 
 - Move production crop images to persistent object storage rather than ephemeral application storage.
 
 ## File uploads
-Only JPG, PNG and WEBP crop images are accepted. The default maximum upload size is 5 MB and can be configured with `MAX_UPLOAD_MB`.
+Only JPG, PNG and WEBP crop images are accepted. There is no application-side crop image file-size ceiling. Hosting, proxy, or storage providers may still enforce their own technical limits.
 
 ## Dependency maintenance
 Review and update Python dependencies regularly. Test upgrades before deploying them to production.

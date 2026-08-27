@@ -8,8 +8,8 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 from .auth import admin_credentials,create_verified_session,current_user,require_role,send_otp,verify_otp
 from .database import SessionLocal,get_db
-from .models import AdminAccount,Booking,Crop,Notification,Review,SavedAddress,SupportMessage,SupportTicket,User
-from .schemas import AddressSave,AdminCreate,AdminLogin,Approval,BookingCreate,CartCheckout,CropRemoval,Decision,NotificationMark,ReviewCreate,SendOtp,StatusUpdate,StockUpdate,VerifyOtp,DeliveryOtpVerify,SupportMessageCreate,SupportStatusUpdate,SupportTicketCreate,AdminCropEdit,Msg91Login
+from .models import AdminAccount,Booking,Crop,Notification,OtpCode,Review,SavedAddress,Session as UserSession,SupportMessage,SupportTicket,User
+from .schemas import AddressSave,AdminCreate,AdminLogin,Approval,BookingCreate,CartCheckout,CropRemoval,Decision,NotificationMark,ReviewCreate,SendOtp,StatusUpdate,StockUpdate,VerifyOtp,DeliveryOtpVerify,SupportMessageCreate,SupportStatusUpdate,SupportTicketCreate,AdminCropEdit,AdminUserEdit,Msg91Login
 ROOT=Path(__file__).resolve().parents[1];UPLOADS=ROOT/'uploads';UPLOADS.mkdir(exist_ok=True);FRONTEND=ROOT/'frontend'
 app=FastAPI(title='Village Market API',version='2.0')
 @app.middleware('http')
@@ -71,10 +71,7 @@ def upload(file,uid):
     suffix=Path(file.filename).suffix.lower()
     if declared not in allowed_types or suffix not in {'.jpg','.jpeg','.png','.webp'}:
         raise HTTPException(400,'Only JPG, PNG or WEBP crop images are allowed')
-    max_bytes=int(os.getenv('MAX_UPLOAD_MB','5'))*1024*1024
-    file.file.seek(0,2);size=file.file.tell();file.file.seek(0)
-    if size<=0 or size>max_bytes:
-        raise HTTPException(400,f'Crop image must be between 1 byte and {os.getenv("MAX_UPLOAD_MB","5")} MB')
+    # No application-side image size ceiling. The hosting/storage provider may still enforce its own request/object limits.
     ext=allowed_types[declared]
     fn=f'{uid}_{secrets.token_hex(12)}{ext}'
     backend=os.getenv('STORAGE_BACKEND','local').lower()
@@ -586,6 +583,58 @@ def admin_verify_delivery_otp(bid:int,data:DeliveryOtpVerify,db:Session=Depends(
     if c: notify(db,c.farmer_id,'Order delivered',f'Order #{b.id} for {c.name} has been delivered successfully.')
     db.commit();emit({'type':'order_status','booking_id':b.id,'status':'delivered'})
     return {'ok':True,'status':'delivered'}
+
+@app.get('/api/admin/users')
+def admin_users(db:Session=Depends(get_db),admin:User=Depends(require_role('superadmin'))):
+    rows=db.query(User).filter(User.role!='superadmin').order_by(User.id.desc()).all()
+    out=[]
+    for u in rows:
+        session_roles=sorted({r[0] for r in db.query(UserSession.role).filter(UserSession.user_id==u.id).all() if r[0]})
+        out.append({'id':u.id,'name':u.name,'phone':u.phone,'email':u.email,'verified':bool(u.verified),'registered_role':u.role,'login_roles':session_roles,'created_at':u.created_at.isoformat() if u.created_at else None})
+    return out
+
+@app.patch('/api/admin/users/{user_id}')
+def admin_edit_user(user_id:int,data:AdminUserEdit,db:Session=Depends(get_db),admin:User=Depends(require_role('superadmin'))):
+    u=db.get(User,user_id)
+    if not u or u.role=='superadmin': raise HTTPException(404,'Buyer/Farmer account not found')
+    u.name=data.name.strip();u.email=(data.email or '').strip() or None;u.verified=bool(data.verified)
+    db.commit();return {'ok':True,'id':u.id,'name':u.name,'email':u.email,'verified':u.verified}
+
+@app.delete('/api/admin/users/{user_id}')
+def admin_delete_user(user_id:int,db:Session=Depends(get_db),admin:User=Depends(require_role('superadmin'))):
+    u=db.get(User,user_id)
+    if not u or u.role=='superadmin': raise HTTPException(404,'Buyer/Farmer account not found')
+    # Remove dependent marketplace records deliberately so admin can fully remove an account.
+    crop_ids=[r[0] for r in db.query(Crop.id).filter(Crop.farmer_id==u.id).all()]
+    booking_ids={r[0] for r in db.query(Booking.id).filter(Booking.buyer_id==u.id).all()}
+    if crop_ids:
+        booking_ids.update(r[0] for r in db.query(Booking.id).filter(Booking.crop_id.in_(crop_ids)).all())
+    if booking_ids:
+        db.query(Review).filter(Review.booking_id.in_(booking_ids)).delete(synchronize_session=False)
+        db.query(Booking).filter(Booking.id.in_(booking_ids)).delete(synchronize_session=False)
+    if crop_ids:
+        db.query(Review).filter(Review.crop_id.in_(crop_ids)).delete(synchronize_session=False)
+        db.query(Crop).filter(Crop.id.in_(crop_ids)).delete(synchronize_session=False)
+    ticket_ids=[r[0] for r in db.query(SupportTicket.id).filter(SupportTicket.user_id==u.id).all()]
+    if ticket_ids:
+        db.query(SupportMessage).filter(SupportMessage.ticket_id.in_(ticket_ids)).delete(synchronize_session=False)
+        db.query(SupportTicket).filter(SupportTicket.id.in_(ticket_ids)).delete(synchronize_session=False)
+    db.query(SupportMessage).filter(SupportMessage.sender_user_id==u.id).delete(synchronize_session=False)
+    db.query(Notification).filter(Notification.user_id==u.id).delete(synchronize_session=False)
+    db.query(SavedAddress).filter(SavedAddress.user_id==u.id).delete(synchronize_session=False)
+    db.query(UserSession).filter(UserSession.user_id==u.id).delete(synchronize_session=False)
+    db.query(OtpCode).filter(OtpCode.phone==u.phone).delete(synchronize_session=False)
+    db.delete(u);db.commit();emit({'type':'admin_user_deleted','user_id':user_id});return {'ok':True}
+
+@app.delete('/api/admin/bookings/{booking_id}')
+def admin_delete_booking(booking_id:int,db:Session=Depends(get_db),admin:User=Depends(require_role('superadmin'))):
+    b=db.get(Booking,booking_id)
+    if not b: raise HTTPException(404,'Order not found')
+    c=db.get(Crop,b.crop_id)
+    if c and b.status not in {'delivered','buyer_cancelled','admin_cancelled','farmer_rejected'}:
+        c.available_kg=round(c.available_kg+b.quantity_kg,2)
+    db.query(Review).filter(Review.booking_id==booking_id).delete(synchronize_session=False)
+    db.delete(b);db.commit();emit({'type':'admin_order_deleted','booking_id':booking_id});return {'ok':True}
 
 @app.get('/api/admin/vendors')
 def vendors(db:Session=Depends(get_db),admin:User=Depends(require_role('superadmin'))):

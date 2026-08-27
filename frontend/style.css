@@ -469,3 +469,19 @@ html,body{max-width:100%;overflow-x:hidden}.publishedCropActions{display:flex;ga
   .farmerOrderActions button,.supportCloseBtn,.dangerBtn{touch-action:manipulation}
   .farmerOrderQty strong{font-size:28px}.cropHarvest{margin-top:12px;padding-top:10px;border-top:1px solid var(--line)}
 }
+
+
+/* v84 — no-refresh language switch + compact cart quantity + address-first ordering */
+.cartSavedAddress{display:flex;align-items:center;justify-content:space-between;gap:14px;margin:14px 0;padding:14px 16px;background:#fff;border:1px solid var(--line);border-radius:14px}.cartSavedAddress small,.cartSavedAddress b{display:block}.cartSavedAddress small{color:var(--muted);margin-bottom:4px}.cartSavedAddress b{overflow-wrap:anywhere}
+@media(max-width:700px){
+  .cartQty{display:inline-grid!important;grid-template-columns:38px 64px 38px!important;width:154px!important;max-width:154px!important;gap:5px!important;justify-content:start!important}
+  .cartQty .qtyBtn{width:38px!important;height:38px!important;min-width:38px!important;font-size:23px!important}
+  .cartQty .qtyInput{width:64px!important;height:38px!important;padding:4px 5px!important;font-size:16px!important}
+  .cartQtyUnit{grid-column:1/-1!important;margin:0!important;text-align:center!important}
+  .cartSavedAddress{align-items:stretch;flex-direction:column}.cartSavedAddress .secondaryBtn{width:100%}
+}
+/* v84 admin mobile: six control areas remain usable */
+@media(max-width:900px){
+  #adminApp>header nav{grid-template-columns:repeat(3,1fr)!important}
+  #adminContent{padding-bottom:150px!important}
+}

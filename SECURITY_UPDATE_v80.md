@@ -9,7 +9,7 @@ Changes include:
 - Privacy Policy and Terms pages linked from login.
 - Baseline security headers (nosniff, frame denial, referrer policy, permissions policy, HSTS in production).
 - Production admin credentials must be configured explicitly.
-- Crop upload validation: JPG/PNG/WEBP only, randomized stored filename, default 5 MB limit.
+- Crop upload validation: JPG/PNG/WEBP only, randomized stored filename, no application-side file-size ceiling; hosting/storage provider limits may still apply.
 - Added idempotent `20260826_0004_fix_sessions_role.py` migration for production databases missing `sessions.role`.
 - Removed local `.git`, local database contents, caches and sample/user upload files from the distributable ZIP.
 - Frontend cache version bumped to v80.

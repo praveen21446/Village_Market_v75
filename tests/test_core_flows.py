@@ -437,7 +437,7 @@ def test_frontend_cache_and_removed_demo_defaults():
     html = home.text
     assert 'Demo Buyer' not in html
     assert '9999999999' not in html
-    assert '?v=82' in html
+    assert '?v=84' in html
     js = client.get('/static/app.js')
     assert js.status_code == 200
     assert 'no-store' in js.headers.get('cache-control','')
@@ -572,9 +572,28 @@ def test_v82_mobile_action_wiring_and_fresh_reset_migration_present():
     assert "data-support-filter" in app_js
     assert "cancelOrderConfirmBtn" in app_js
     assert "grid-template-columns:44px minmax(64px,1fr) 44px" in css
-    assert "app.js?v=82" in html and "style.css?v=82" in html
+    assert "app.js?v=84" in html and "style.css?v=84" in html
     assert migration.exists()
     text = migration.read_text(encoding="utf-8")
     assert "DELETE FROM crops" in text
     assert "DELETE FROM bookings" in text
     assert "admin_accounts" in text
+
+
+def test_v83_language_coverage_and_force_reset_present():
+    root = Path(__file__).resolve().parents[1]
+    app_js = (root / "frontend" / "app.js").read_text(encoding="utf-8")
+    html = (root / "frontend" / "index.html").read_text(encoding="utf-8")
+    migration = root / "alembic" / "versions" / "20260827_0007_force_fresh_start.py"
+    assert 'data-i18n="Live Support"' in html
+    assert "${t('LIVE SUPPORT')}" in app_js
+    assert "${t('Active Orders')}" in app_js
+    assert "${t('Delivered Orders')}" in app_js
+    assert "${t('New buyer orders will appear here.')}" in app_js
+    assert "const PAGE_I18N=" in app_js
+    assert "vm_fresh_reset_v83" in app_js
+    assert migration.exists()
+    text = migration.read_text(encoding="utf-8")
+    assert 'DELETE FROM bookings' in text
+    assert 'DELETE FROM crops' in text
+    assert 'DELETE FROM users' in text
