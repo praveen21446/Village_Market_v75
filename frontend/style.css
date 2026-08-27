@@ -609,3 +609,11 @@ html,body{max-width:100%;overflow-x:hidden}.publishedCropActions{display:flex;ga
     white-space:nowrap!important;
   }
 }
+
+/* v98 farmer crop categories + safe submit */
+button:disabled{opacity:.62;cursor:not-allowed}
+.farmerCropCategories{display:grid;gap:28px;margin-top:28px}
+.farmerCropCategory{display:grid;gap:12px}
+.farmerCategoryHead{display:flex;align-items:center;gap:10px}
+.farmerCategoryHead .sectionTitle{margin:0}
+.farmerCategoryCount{min-width:30px;height:30px;padding:0 9px;border-radius:999px;background:var(--green-soft);color:var(--green);display:inline-flex;align-items:center;justify-content:center;font-weight:800}
