@@ -75,14 +75,36 @@ def upload(file,uid):
     ext=allowed_types[declared]
     fn=f'{uid}_{secrets.token_hex(12)}{ext}'
     backend=os.getenv('STORAGE_BACKEND','local').lower()
-    if backend=='s3' and os.getenv('S3_BUCKET'):
+    if backend in {'s3','r2'} and os.getenv('S3_BUCKET'):
         try:
             import boto3
-            s3=boto3.client('s3',region_name=os.getenv('AWS_REGION'))
-            s3.upload_fileobj(file.file,os.getenv('S3_BUCKET'),fn,ExtraArgs={'ContentType':declared})
-            base=os.getenv('S3_PUBLIC_BASE_URL')
-            return f'{base.rstrip("/")}/{fn}' if base else f's3://{os.getenv("S3_BUCKET")}/{fn}'
-        except Exception as e: raise HTTPException(500,f'S3 upload failed: {e}')
+            bucket=os.getenv('S3_BUCKET','').strip()
+            endpoint=(os.getenv('S3_ENDPOINT_URL') or '').strip().rstrip('/')
+            # Cloudflare sometimes shows a bucket-specific S3 URL. boto3 needs the account-level endpoint.
+            if endpoint and bucket and endpoint.endswith('/'+bucket):
+                endpoint=endpoint[:-(len(bucket)+1)]
+            access_key=(os.getenv('S3_ACCESS_KEY_ID') or os.getenv('AWS_ACCESS_KEY_ID') or '').strip()
+            secret_key=(os.getenv('S3_SECRET_ACCESS_KEY') or os.getenv('AWS_SECRET_ACCESS_KEY') or '').strip()
+            region=(os.getenv('S3_REGION') or os.getenv('AWS_REGION') or 'auto').strip()
+            client_kwargs={'region_name':region}
+            if endpoint: client_kwargs['endpoint_url']=endpoint
+            if access_key: client_kwargs['aws_access_key_id']=access_key
+            if secret_key: client_kwargs['aws_secret_access_key']=secret_key
+            s3=boto3.client('s3',**client_kwargs)
+            key=f'crop-images/{uid}/{fn}'
+            s3.upload_fileobj(file.file,bucket,key,ExtraArgs={
+                'ContentType':declared,
+                'CacheControl':'public, max-age=31536000, immutable',
+                'ContentDisposition':'inline',
+            })
+            base=(os.getenv('S3_PUBLIC_BASE_URL') or '').strip().rstrip('/')
+            if not base:
+                raise RuntimeError('S3_PUBLIC_BASE_URL is required for buyer-visible crop photos')
+            return f'{base}/{key}'
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(500,f'Cloud storage upload failed: {e}')
     with open(UPLOADS/fn,'wb') as out: shutil.copyfileobj(file.file,out)
     return f'/uploads/{fn}'
 def crop_photos(c):

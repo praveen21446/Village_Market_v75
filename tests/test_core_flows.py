@@ -630,3 +630,17 @@ def test_v88_cart_quantity_strong_horizontal_override():
     assert "grid-template-columns:42px 42px 42px auto!important" in css
     assert "grid-template-rows:42px!important" in css
     assert "width:max-content!important" in css
+
+
+def test_v89_cloudflare_r2_configuration_present():
+    root = Path(__file__).resolve().parents[1]
+    main_py = (root / "backend" / "main.py").read_text(encoding="utf-8")
+    env = (root / ".env.example").read_text(encoding="utf-8")
+    assert "S3_ENDPOINT_URL" in main_py
+    assert "S3_ACCESS_KEY_ID" in main_py
+    assert "S3_SECRET_ACCESS_KEY" in main_py
+    assert "S3_PUBLIC_BASE_URL is required for buyer-visible crop photos" in main_py
+    assert "crop-images/{uid}/{fn}" in main_py
+    assert "STORAGE_BACKEND=r2" in env
+    assert "S3_REGION=auto" in env
+    assert "r2.cloudflarestorage.com" in env
