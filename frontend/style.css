@@ -561,3 +561,51 @@ html,body{max-width:100%;overflow-x:hidden}.publishedCropActions{display:flex;ga
     white-space:nowrap!important;
   }
 }
+
+/* v88 — definitive mobile cart quantity horizontal row override */
+@media (max-width:700px){
+  .table .row > span.cartQty{
+    display:grid!important;
+    grid-template-columns:42px 42px 42px auto!important;
+    grid-template-rows:42px!important;
+    grid-auto-flow:column!important;
+    align-items:center!important;
+    justify-content:start!important;
+    column-gap:6px!important;
+    row-gap:0!important;
+    width:max-content!important;
+    min-width:0!important;
+    max-width:100%!important;
+    white-space:nowrap!important;
+    overflow:visible!important;
+  }
+  .table .row > span.cartQty > .qtyBtn,
+  .table .row > span.cartQty > .qtyInput{
+    display:flex!important;
+    align-items:center!important;
+    justify-content:center!important;
+    box-sizing:border-box!important;
+    width:42px!important;
+    min-width:42px!important;
+    max-width:42px!important;
+    height:42px!important;
+    min-height:42px!important;
+    margin:0!important;
+    padding:0!important;
+  }
+  .table .row > span.cartQty > .qtyInput{
+    text-align:center!important;
+    line-height:42px!important;
+  }
+  .table .row > span.cartQty > .cartQtyUnit{
+    display:block!important;
+    width:auto!important;
+    min-width:0!important;
+    margin:0!important;
+    padding:0!important;
+    grid-column:auto!important;
+    grid-row:auto!important;
+    line-height:42px!important;
+    white-space:nowrap!important;
+  }
+}

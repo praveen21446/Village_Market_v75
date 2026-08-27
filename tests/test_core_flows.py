@@ -572,7 +572,7 @@ def test_v82_mobile_action_wiring_and_fresh_reset_migration_present():
     assert "data-support-filter" in app_js
     assert "cancelOrderConfirmBtn" in app_js
     assert "grid-template-columns:44px minmax(64px,1fr) 44px" in css
-    assert "app.js?v=87" in html and "style.css?v=87" in html
+    assert "app.js?v=87" in html and "style.css?v=88" in html
     assert migration.exists()
     text = migration.read_text(encoding="utf-8")
     assert "DELETE FROM crops" in text
@@ -620,4 +620,13 @@ def test_v87_mobile_cart_quantity_forced_single_row():
     assert "flex-direction:row!important" in css
     assert "flex-wrap:nowrap!important" in css
     assert "flex:0 0 42px!important" in css
-    assert "style.css?v=87" in html
+    assert "style.css?v=88" in html
+
+
+def test_v88_cart_quantity_strong_horizontal_override():
+    root = Path(__file__).resolve().parents[1]
+    css = (root / "frontend" / "style.css").read_text(encoding="utf-8")
+    assert ".table .row > span.cartQty" in css
+    assert "grid-template-columns:42px 42px 42px auto!important" in css
+    assert "grid-template-rows:42px!important" in css
+    assert "width:max-content!important" in css
