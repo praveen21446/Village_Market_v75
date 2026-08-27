@@ -617,3 +617,11 @@ button:disabled{opacity:.62;cursor:not-allowed}
 .farmerCategoryHead{display:flex;align-items:center;gap:10px}
 .farmerCategoryHead .sectionTitle{margin:0}
 .farmerCategoryCount{min-width:30px;height:30px;padding:0 9px;border-radius:999px;background:var(--green-soft);color:var(--green);display:inline-flex;align-items:center;justify-content:center;font-weight:800}
+
+/* v99 farmer dashboard crop filters */
+.farmerFilterBar{display:flex;gap:10px;overflow-x:auto;padding:4px 2px 12px;margin:26px 0 14px;scrollbar-width:thin;-webkit-overflow-scrolling:touch}
+.farmerFilterBtn{flex:0 0 auto;display:inline-flex;align-items:center;gap:8px;min-height:44px;padding:9px 14px;border:1px solid #d6dfd5;border-radius:999px;background:#fff;color:var(--ink);font-weight:800;cursor:pointer}
+.farmerFilterBtn b{min-width:24px;height:24px;padding:0 7px;border-radius:999px;display:inline-flex;align-items:center;justify-content:center;background:#eef3ee;color:var(--green);font-size:12px}
+.farmerFilterBtn.active{background:var(--green);border-color:var(--green);color:#fff}
+.farmerFilterBtn.active b{background:rgba(255,255,255,.18);color:#fff}
+@media(max-width:600px){.farmerFilterBar{margin-left:-2px;margin-right:-2px}.farmerFilterBtn{min-height:42px;padding:8px 12px}}
