@@ -13,8 +13,15 @@ from .schemas import AddressSave,AdminCreate,AdminLogin,Approval,BookingCreate,C
 ROOT=Path(__file__).resolve().parents[1];UPLOADS=ROOT/'uploads';UPLOADS.mkdir(exist_ok=True);FRONTEND=ROOT/'frontend'
 app=FastAPI(title='Village Market API',version='2.0')
 @app.middleware('http')
-async def no_stale_frontend(request,call_next):
+async def security_and_cache_headers(request,call_next):
     response=await call_next(request)
+    # Baseline browser hardening. These headers do not expose application secrets.
+    response.headers['X-Content-Type-Options']='nosniff'
+    response.headers['X-Frame-Options']='DENY'
+    response.headers['Referrer-Policy']='strict-origin-when-cross-origin'
+    response.headers['Permissions-Policy']='camera=(), microphone=(), geolocation=(self)'
+    if os.getenv('APP_ENV','development').lower()=='production':
+        response.headers['Strict-Transport-Security']='max-age=31536000; includeSubDomains'
     if request.url.path=='/' or request.url.path.startswith('/static/'):
         response.headers['Cache-Control']='no-store, no-cache, must-revalidate, max-age=0'
         response.headers['Pragma']='no-cache'
@@ -59,10 +66,25 @@ def emit(payload):
     except Exception: pass
 def upload(file,uid):
     if not file or not file.filename:return None
-    fn=f'{uid}_{Path(file.filename).name.replace(" ","_")}';backend=os.getenv('STORAGE_BACKEND','local').lower()
+    allowed_types={'image/jpeg':'.jpg','image/png':'.png','image/webp':'.webp'}
+    declared=(file.content_type or '').lower()
+    suffix=Path(file.filename).suffix.lower()
+    if declared not in allowed_types or suffix not in {'.jpg','.jpeg','.png','.webp'}:
+        raise HTTPException(400,'Only JPG, PNG or WEBP crop images are allowed')
+    max_bytes=int(os.getenv('MAX_UPLOAD_MB','5'))*1024*1024
+    file.file.seek(0,2);size=file.file.tell();file.file.seek(0)
+    if size<=0 or size>max_bytes:
+        raise HTTPException(400,f'Crop image must be between 1 byte and {os.getenv("MAX_UPLOAD_MB","5")} MB')
+    ext=allowed_types[declared]
+    fn=f'{uid}_{secrets.token_hex(12)}{ext}'
+    backend=os.getenv('STORAGE_BACKEND','local').lower()
     if backend=='s3' and os.getenv('S3_BUCKET'):
         try:
-            import boto3;s3=boto3.client('s3',region_name=os.getenv('AWS_REGION'));s3.upload_fileobj(file.file,os.getenv('S3_BUCKET'),fn,ExtraArgs={'ContentType':file.content_type or 'application/octet-stream'});base=os.getenv('S3_PUBLIC_BASE_URL');return f'{base.rstrip("/")}/{fn}' if base else f's3://{os.getenv("S3_BUCKET")}/{fn}'
+            import boto3
+            s3=boto3.client('s3',region_name=os.getenv('AWS_REGION'))
+            s3.upload_fileobj(file.file,os.getenv('S3_BUCKET'),fn,ExtraArgs={'ContentType':declared})
+            base=os.getenv('S3_PUBLIC_BASE_URL')
+            return f'{base.rstrip("/")}/{fn}' if base else f's3://{os.getenv("S3_BUCKET")}/{fn}'
         except Exception as e: raise HTTPException(500,f'S3 upload failed: {e}')
     with open(UPLOADS/fn,'wb') as out: shutil.copyfileobj(file.file,out)
     return f'/uploads/{fn}'
@@ -101,6 +123,10 @@ def address_dict(a):
 def home():return FileResponse(FRONTEND/'index.html')
 @app.get('/admin',include_in_schema=False)
 def admin_home():return FileResponse(FRONTEND/'admin.html')
+@app.get('/privacy',include_in_schema=False)
+def privacy_page():return FileResponse(FRONTEND/'privacy.html')
+@app.get('/terms',include_in_schema=False)
+def terms_page():return FileResponse(FRONTEND/'terms.html')
 def _public_msg91_config():
     return {
         'widget_id': os.getenv('MSG91_WIDGET_ID','').strip(),

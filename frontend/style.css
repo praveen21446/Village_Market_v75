@@ -442,3 +442,6 @@ html,body{max-width:100%;overflow-x:hidden}.publishedCropActions{display:flex;ga
 .otpResend{margin-top:8px;border:0;background:transparent;padding:4px 0;font-weight:700;cursor:pointer;text-decoration:underline}
 .otpResend:disabled{cursor:not-allowed;opacity:.55;text-decoration:none}
 @media(max-width:430px){.msg91Captcha{transform-origin:left top;max-width:100%}#otp{font-size:18px;letter-spacing:.25em}}
+
+/* Security/legal links */
+.legalLinks{margin-top:8px!important;text-align:center}.legalLinks a{color:var(--green);font-weight:700;text-decoration:none}.legalLinks a:hover{text-decoration:underline}

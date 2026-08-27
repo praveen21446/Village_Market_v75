@@ -32,7 +32,14 @@ def verify_otp(phone,code,role,name,email,db):
     if not otp or otp.expires_at<datetime.utcnow(): raise HTTPException(400,'Invalid or expired OTP')
     db.delete(otp);db.flush()
     return create_verified_session(phone,role,name,email,db)
-def admin_credentials(): return os.getenv('ADMIN_ID','admin'),os.getenv('ADMIN_PASSWORD','looser@123')
+def admin_credentials():
+    admin_id=os.getenv('ADMIN_ID','').strip()
+    admin_password=os.getenv('ADMIN_PASSWORD','')
+    if os.getenv('APP_ENV','development').lower()=='production':
+        if not admin_id or not admin_password:
+            raise HTTPException(503,'Admin credentials are not configured securely on the server')
+        return admin_id,admin_password
+    return admin_id or 'admin',admin_password or 'dev-only-change-me'
 def current_user(authorization:str|None=Header(None),db:DbSession=Depends(get_db)):
     if not authorization or not authorization.startswith('Bearer '): raise HTTPException(401,'Please sign in')
     s=db.get(Session,authorization[7:]);

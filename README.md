@@ -102,7 +102,7 @@ Primary development credentials:
 
 ```text
 Admin ID: admin
-Password: looser@123
+Password: CHANGE_ME_STRONG_PASSWORD
 ```
 
 For a real deployment, override them using `.env`.
@@ -198,7 +198,7 @@ run_tests.bat
 
 
 ## v65 changes
-- Primary admin password is `looser@123` unless overridden by `ADMIN_PASSWORD` in `.env`.
+- In production, `ADMIN_ID` and `ADMIN_PASSWORD` must be configured explicitly through environment variables.
 - Admin portal now includes an **Admins** page where an authenticated admin can create or remove additional admin accounts.
 - Removed demo/pre-filled Buyer name and phone values from the login form.
 - Removed the demo credentials hint from the Admin login form.

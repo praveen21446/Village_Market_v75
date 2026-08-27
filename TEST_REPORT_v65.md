@@ -1,7 +1,7 @@
 # Village Market v65 Test Report
 
 ## Requested changes
-- Primary admin fallback password changed to `looser@123`.
+- Primary admin fallback password changed to `CHANGE_ME_STRONG_PASSWORD`.
 - Added Admin Management page so an authenticated admin can create additional admins.
 - Added independent login for additional admins.
 - Added removal of additional admins and session invalidation.

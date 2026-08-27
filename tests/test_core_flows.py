@@ -10,7 +10,7 @@ except FileNotFoundError:
     pass
 os.environ["DATABASE_URL"] = f"sqlite:///{TEST_DB.as_posix()}"
 os.environ["ADMIN_ID"] = "admin"
-os.environ["ADMIN_PASSWORD"] = "looser@123"
+os.environ["ADMIN_PASSWORD"] = "CHANGE_ME_STRONG_PASSWORD"
 os.environ["APP_ENV"] = "test"
 
 from fastapi.testclient import TestClient
@@ -100,7 +100,7 @@ def test_complete_v63_v64_regression_flow():
 
     r = client.post("/api/admin/login", json={"admin_id": "admin", "password": "wrong"})
     assert r.status_code == 401
-    r = client.post("/api/admin/login", json={"admin_id": "admin", "password": "looser@123"})
+    r = client.post("/api/admin/login", json={"admin_id": "admin", "password": "CHANGE_ME_STRONG_PASSWORD"})
     assert r.status_code == 200, r.text
     admin = r.json()["token"]
 
@@ -377,7 +377,7 @@ def test_static_javascript_contains_stability_fixes():
 
 
 def test_admin_can_create_and_remove_other_admin():
-    r = client.post("/api/admin/login", json={"admin_id": "admin", "password": "looser@123"})
+    r = client.post("/api/admin/login", json={"admin_id": "admin", "password": "CHANGE_ME_STRONG_PASSWORD"})
     assert r.status_code == 200, r.text
     primary = r.json()["token"]
 
@@ -437,7 +437,7 @@ def test_frontend_cache_and_removed_demo_defaults():
     html = home.text
     assert 'Demo Buyer' not in html
     assert '9999999999' not in html
-    assert '?v=79' in html
+    assert '?v=80' in html
     js = client.get('/static/app.js')
     assert js.status_code == 200
     assert 'no-store' in js.headers.get('cache-control','')
@@ -495,7 +495,7 @@ def test_demo_otp_endpoints_disabled_in_production(monkeypatch):
 
 def test_live_support_buyer_admin_flow():
     buyer = otp_login("9000000091", "buyer", "Support Buyer")
-    r = client.post("/api/admin/login", json={"admin_id": "admin", "password": "looser@123"})
+    r = client.post("/api/admin/login", json={"admin_id": "admin", "password": "CHANGE_ME_STRONG_PASSWORD"})
     assert r.status_code == 200, r.text
     admin = r.json()["token"]
 
