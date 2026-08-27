@@ -437,7 +437,7 @@ def test_frontend_cache_and_removed_demo_defaults():
     html = home.text
     assert 'Demo Buyer' not in html
     assert '9999999999' not in html
-    assert '?v=80' in html
+    assert '?v=82' in html
     js = client.get('/static/app.js')
     assert js.status_code == 200
     assert 'no-store' in js.headers.get('cache-control','')
@@ -528,3 +528,53 @@ def test_live_support_buyer_admin_flow():
     assert close.status_code == 200 and close.json()["status"] == "closed"
     blocked = client.post(f"/api/support/tickets/{ticket_id}/messages", headers=headers(buyer), json={"message":"hello"})
     assert blocked.status_code == 400
+
+def test_crop_requires_at_least_one_photo_and_accepts_multiple():
+    farmer = otp_login("9000000091", "farmer", "Photo Farmer")
+    data = {
+        "name": "Tomato",
+        "category": "Vegetables",
+        "quantity_kg": "50",
+        "location": "Photo Farm",
+        "village": "Test Village",
+        "mandal": "Test Mandal",
+        "district": "Kadapa",
+        "state": "Andhra Pradesh",
+        "pincode": "516001",
+        "expected_price": "25",
+        "quality": "Grade A",
+        "harvest_date": "2026-09-01",
+        "details": "Multiple image crop",
+    }
+    missing = client.post("/api/crops", headers=headers(farmer), data=data)
+    assert missing.status_code == 400
+    assert "At least 1 crop photo" in missing.text
+
+    files = [
+        ("photos", ("crop1.jpg", b"image-one", "image/jpeg")),
+        ("photos", ("crop2.png", b"image-two", "image/png")),
+    ]
+    result = client.post("/api/crops", headers=headers(farmer), data=data, files=files)
+    assert result.status_code == 200, result.text
+    body = result.json()
+    assert len(body["photos"]) == 2
+    assert body["photo"] == body["photos"][0]
+
+def test_v82_mobile_action_wiring_and_fresh_reset_migration_present():
+    root = Path(__file__).resolve().parents[1]
+    app_js = (root / "frontend" / "app.js").read_text(encoding="utf-8")
+    css = (root / "frontend" / "style.css").read_text(encoding="utf-8")
+    html = (root / "frontend" / "index.html").read_text(encoding="utf-8")
+    migration = root / "alembic" / "versions" / "20260827_0006_fresh_start_reset.py"
+
+    assert 'data-farmer-decision="accept"' in app_js
+    assert "data-cancel-order" in app_js
+    assert "data-support-filter" in app_js
+    assert "cancelOrderConfirmBtn" in app_js
+    assert "grid-template-columns:44px minmax(64px,1fr) 44px" in css
+    assert "app.js?v=82" in html and "style.css?v=82" in html
+    assert migration.exists()
+    text = migration.read_text(encoding="utf-8")
+    assert "DELETE FROM crops" in text
+    assert "DELETE FROM bookings" in text
+    assert "admin_accounts" in text
