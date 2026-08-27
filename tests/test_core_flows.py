@@ -437,7 +437,7 @@ def test_frontend_cache_and_removed_demo_defaults():
     html = home.text
     assert 'Demo Buyer' not in html
     assert '9999999999' not in html
-    assert '?v=84' in html
+    assert '?v=87' in html
     js = client.get('/static/app.js')
     assert js.status_code == 200
     assert 'no-store' in js.headers.get('cache-control','')
@@ -572,7 +572,7 @@ def test_v82_mobile_action_wiring_and_fresh_reset_migration_present():
     assert "data-support-filter" in app_js
     assert "cancelOrderConfirmBtn" in app_js
     assert "grid-template-columns:44px minmax(64px,1fr) 44px" in css
-    assert "app.js?v=84" in html and "style.css?v=84" in html
+    assert "app.js?v=87" in html and "style.css?v=87" in html
     assert migration.exists()
     text = migration.read_text(encoding="utf-8")
     assert "DELETE FROM crops" in text
@@ -611,3 +611,13 @@ def test_v85_optional_details_editable_cart_and_error_banner_present():
     assert "window.reviewCartRemove" in app_js
     assert "showPageError(msg)" in app_js
     assert "pageErrorBanner" in css
+
+
+def test_v87_mobile_cart_quantity_forced_single_row():
+    root = Path(__file__).resolve().parents[1]
+    css = (root / "frontend" / "style.css").read_text(encoding="utf-8")
+    html = (root / "frontend" / "index.html").read_text(encoding="utf-8")
+    assert "flex-direction:row!important" in css
+    assert "flex-wrap:nowrap!important" in css
+    assert "flex:0 0 42px!important" in css
+    assert "style.css?v=87" in html
