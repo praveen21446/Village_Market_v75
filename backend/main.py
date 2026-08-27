@@ -60,7 +60,24 @@ async def security_and_cache_headers(request,call_next):
     response.headers['X-Frame-Options']='DENY'
     response.headers['Referrer-Policy']='strict-origin-when-cross-origin'
     response.headers['Permissions-Policy']='camera=(), microphone=(), geolocation=(self)'
-    response.headers['Content-Security-Policy']="default-src 'self'; img-src 'self' data: blob: https:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' https://*.msg91.com https://*.msg91.com; connect-src 'self' https: wss:; frame-src https://*.msg91.com; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
+    response.headers['Content-Security-Policy']=(
+        "default-src 'self'; "
+        "img-src 'self' data: blob: https:; "
+        "style-src 'self' 'unsafe-inline'; "
+        "script-src 'self' 'unsafe-inline' "
+        "https://*.msg91.com "
+        "https://pass.hostnetsoft.com "
+        "https://checkout.razorpay.com; "
+        "connect-src 'self' https: wss:; "
+        "frame-src "
+        "https://*.msg91.com "
+        "https://api.razorpay.com "
+        "https://checkout.razorpay.com; "
+        "object-src 'none'; "
+        "base-uri 'self'; "
+        "frame-ancestors 'none'; "
+        "form-action 'self'"
+    )
     if os.getenv('APP_ENV','development').lower()=='production':
         response.headers['Strict-Transport-Security']='max-age=31536000; includeSubDomains'
     if request.url.path=='/' or request.url.path.startswith('/static/'):
