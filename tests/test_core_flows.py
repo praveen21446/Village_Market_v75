@@ -644,3 +644,13 @@ def test_v89_cloudflare_r2_configuration_present():
     assert "STORAGE_BACKEND=r2" in env
     assert "S3_REGION=auto" in env
     assert "r2.cloudflarestorage.com" in env
+
+
+def test_v91_r2_photo_cleanup_hook_present():
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1]
+    main_py = (root / "backend" / "main.py").read_text(encoding="utf-8")
+    assert "def delete_crop_photo_object(" in main_py
+    assert "def delete_crop_photos(" in main_py
+    assert "s3.delete_object(Bucket=bucket,Key=key)" in main_py
+    assert "delete_crop_photos(c)" in main_py

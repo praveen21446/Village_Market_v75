@@ -118,6 +118,62 @@ def crop_photos(c):
     if c.photo and c.photo not in photos: photos.insert(0,c.photo)
     return photos
 
+
+def delete_crop_photo_object(photo_url):
+    """Best-effort deletion of one crop image from configured storage.
+
+    Cloud deletion failures are intentionally ignored so an admin can still
+    remove a crop even when the remote object was already deleted/missing.
+    """
+    if not photo_url:
+        return
+    backend=os.getenv('STORAGE_BACKEND','local').lower()
+    if backend in {'s3','r2'} and os.getenv('S3_BUCKET'):
+        try:
+            from urllib.parse import urlparse, unquote
+            import boto3
+            bucket=os.getenv('S3_BUCKET','').strip()
+            base=(os.getenv('S3_PUBLIC_BASE_URL') or '').strip().rstrip('/')
+            url=str(photo_url).strip()
+            if base and url.startswith(base + '/'):
+                key=url[len(base)+1:]
+            else:
+                parsed=urlparse(url)
+                key=unquote(parsed.path.lstrip('/'))
+            if not key:
+                return
+            endpoint=(os.getenv('S3_ENDPOINT_URL') or '').strip().rstrip('/')
+            if endpoint and bucket and endpoint.endswith('/'+bucket):
+                endpoint=endpoint[:-(len(bucket)+1)]
+            access_key=(os.getenv('S3_ACCESS_KEY_ID') or os.getenv('AWS_ACCESS_KEY_ID') or '').strip()
+            secret_key=(os.getenv('S3_SECRET_ACCESS_KEY') or os.getenv('AWS_SECRET_ACCESS_KEY') or '').strip()
+            region=(os.getenv('S3_REGION') or os.getenv('AWS_REGION') or 'auto').strip()
+            client_kwargs={'region_name':region}
+            if endpoint: client_kwargs['endpoint_url']=endpoint
+            if access_key: client_kwargs['aws_access_key_id']=access_key
+            if secret_key: client_kwargs['aws_secret_access_key']=secret_key
+            s3=boto3.client('s3',**client_kwargs)
+            s3.delete_object(Bucket=bucket,Key=key)
+            return
+        except Exception:
+            return
+
+    # Local-development compatibility.
+    try:
+        url=str(photo_url)
+        if url.startswith('/uploads/'):
+            candidate=(UPLOADS/Path(url).name).resolve()
+            if candidate.parent==UPLOADS.resolve() and candidate.exists():
+                candidate.unlink()
+    except Exception:
+        pass
+
+def delete_crop_photos(crop):
+    for photo_url in set(crop_photos(crop)):
+        delete_crop_photo_object(photo_url)
+    crop.photo=None
+    crop.photos_json='[]'
+
 def crop_private(c,db):
     f=db.get(User,c.farmer_id);photos=crop_photos(c);return {'id':c.id,'name':c.name,'category':c.category,'quantity_kg':c.quantity_kg,'available_kg':c.available_kg,'location':c.location,'address_line':c.address_line,'village':c.village,'mandal':c.mandal,'district':c.district,'state':c.state,'pincode':c.pincode,'landmark':c.landmark,'latitude':c.latitude,'longitude':c.longitude,'expected_price':c.expected_price,'quality':c.quality,'harvest_date':c.harvest_date,'details':c.details,'photo':photos[0] if photos else None,'photos':photos,'status':c.status,'market_price':c.market_price,'admin_note':c.admin_note,'farmer_id':c.farmer_id,'farmer_name':f.name if f else 'Farmer','farmer_phone':f.phone if f else ''}
 def crop_public(c,db):
@@ -554,16 +610,18 @@ def remove_market_crop_page(crop_id:int,data:CropRemoval,db:Session=Depends(get_
     if not c:raise HTTPException(404,'Crop not found')
     if c.status!='approved':raise HTTPException(400,'Only a published crop can be removed from the marketplace')
     reason=data.reason.strip()
+    delete_crop_photos(c)
     c.status='removed';c.admin_note=f'Removed from marketplace by admin. Reason: {reason}'
-    notify(db,c.farmer_id,'Crop removed from marketplace',f'{c.name} was removed from the buyer marketplace by admin. Reason: {reason}')
+    notify(db,c.farmer_id,'Crop removed from marketplace',f'{c.name} was removed from the buyer marketplace by admin. Its stored crop photos were also deleted. Reason: {reason}')
     db.commit();emit({'type':'crop_removed','crop_id':c.id});return crop_private(c,db)
 @app.delete('/api/admin/crops/{crop_id}')
 def remove_market_crop(crop_id:int,db:Session=Depends(get_db),admin:User=Depends(require_role('superadmin'))):
     c=db.get(Crop,crop_id)
     if not c:raise HTTPException(404,'Crop not found')
     if c.status!='approved':raise HTTPException(400,'Only a published crop can be removed from the marketplace')
+    delete_crop_photos(c)
     c.status='removed';c.admin_note='Removed from marketplace by admin.'
-    notify(db,c.farmer_id,'Crop removed from marketplace',f'{c.name} was removed from the buyer marketplace by admin.')
+    notify(db,c.farmer_id,'Crop removed from marketplace',f'{c.name} was removed from the buyer marketplace by admin. Its stored crop photos were also deleted.')
     db.commit();emit({'type':'crop_removed','crop_id':c.id});return {'ok':True}
 @app.get('/api/admin/bookings')
 def admin_bookings(db:Session=Depends(get_db),admin:User=Depends(require_role('superadmin'))):return [booking_dict(b,db,True) for b in db.query(Booking).order_by(Booking.id.desc()).all()]
