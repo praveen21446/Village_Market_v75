@@ -1,8 +1,11 @@
 from pathlib import Path
+from collections import defaultdict,deque
+from threading import Lock
+import time
 import asyncio,base64,hashlib,hmac,httpx,json,os,secrets,shutil,smtplib
 from email.message import EmailMessage
 from datetime import datetime,timedelta
-from fastapi import Depends,FastAPI,File,Form,HTTPException,UploadFile,WebSocket,WebSocketDisconnect
+from fastapi import Depends,FastAPI,File,Form,HTTPException,Request,UploadFile,WebSocket,WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
@@ -12,14 +15,52 @@ from .models import AdminAccount,Booking,Crop,Notification,OtpCode,Review,SavedA
 from .schemas import AddressSave,AdminCreate,AdminLogin,Approval,BookingCreate,CartCheckout,CropRemoval,Decision,NotificationMark,ReviewCreate,SendOtp,StatusUpdate,StockUpdate,VerifyOtp,DeliveryOtpVerify,SupportMessageCreate,SupportStatusUpdate,SupportTicketCreate,AdminCropEdit,AdminUserEdit,Msg91Login
 ROOT=Path(__file__).resolve().parents[1];UPLOADS=ROOT/'uploads';UPLOADS.mkdir(exist_ok=True);FRONTEND=ROOT/'frontend'
 app=FastAPI(title='Village Market API',version='2.0')
+
+# Lightweight per-instance throttling. For multi-instance/high-scale deployment,
+# replace with a shared Redis-backed limiter.
+_RATE_BUCKETS=defaultdict(deque)
+_RATE_LOCK=Lock()
+def _rate_limit(key,limit,window_seconds):
+    now=time.monotonic()
+    with _RATE_LOCK:
+        q=_RATE_BUCKETS[key]
+        while q and now-q[0]>=window_seconds:q.popleft()
+        if len(q)>=limit:
+            retry=max(1,int(window_seconds-(now-q[0])))
+            raise HTTPException(429,f'Too many attempts. Try again in {retry} seconds.',headers={'Retry-After':str(retry)})
+        q.append(now)
+
+@app.on_event('startup')
+def validate_production_security():
+    if os.getenv('APP_ENV','development').lower()!='production':
+        return
+    required=['DATABASE_URL','ADMIN_ID','ADMIN_PASSWORD','MSG91_AUTH_KEY','MSG91_WIDGET_ID','MSG91_WIDGET_TOKEN']
+    if os.getenv('STORAGE_BACKEND','local').lower() in {'r2','s3'}:
+        required += ['S3_BUCKET','S3_ENDPOINT_URL','S3_ACCESS_KEY_ID','S3_SECRET_ACCESS_KEY','S3_PUBLIC_BASE_URL']
+    missing=[k for k in required if not os.getenv(k,'').strip()]
+    if missing:
+        raise RuntimeError('Missing required production environment variables: '+', '.join(missing))
+    admin_pw=os.getenv('ADMIN_PASSWORD','')
+    if len(admin_pw)<12 or admin_pw.startswith('CHANGE_ME') or admin_pw=='dev-only-change-me':
+        raise RuntimeError('ADMIN_PASSWORD must be a strong production password of at least 12 characters')
+    if os.getenv('DATABASE_URL','').lower().startswith('sqlite'):
+        raise RuntimeError('Production must use PostgreSQL, not SQLite')
+
 @app.middleware('http')
 async def security_and_cache_headers(request,call_next):
+    if os.getenv('APP_ENV','development').lower()=='production':
+        proto=(request.headers.get('x-forwarded-proto') or request.url.scheme or '').split(',')[0].strip().lower()
+        if proto=='http':
+            host=request.headers.get('host','')
+            from fastapi.responses import RedirectResponse
+            return RedirectResponse(url=f'https://{host}{request.url.path}' + (f'?{request.url.query}' if request.url.query else ''),status_code=308)
     response=await call_next(request)
     # Baseline browser hardening. These headers do not expose application secrets.
     response.headers['X-Content-Type-Options']='nosniff'
     response.headers['X-Frame-Options']='DENY'
     response.headers['Referrer-Policy']='strict-origin-when-cross-origin'
     response.headers['Permissions-Policy']='camera=(), microphone=(), geolocation=(self)'
+    response.headers['Content-Security-Policy']="default-src 'self'; img-src 'self' data: blob: https:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' https://*.msg91.com https://*.msg91.com; connect-src 'self' https: wss:; frame-src https://*.msg91.com; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
     if os.getenv('APP_ENV','development').lower()=='production':
         response.headers['Strict-Transport-Security']='max-age=31536000; includeSubDomains'
     if request.url.path=='/' or request.url.path.startswith('/static/'):
@@ -282,7 +323,9 @@ def msg91_config():
     return _public_msg91_config()
 
 @app.post('/api/auth/msg91-login')
-async def msg91_login(data:Msg91Login,db:Session=Depends(get_db)):
+async def msg91_login(data:Msg91Login,request:Request,db:Session=Depends(get_db)):
+    client_ip=request.client.host if request.client else 'unknown'
+    _rate_limit(f'msg91:{client_ip}:{_digits(data.phone)[-10:]}',8,60)
     await _verify_msg91_token(data.access_token,data.phone)
     tok,u=create_verified_session(data.phone,data.role,data.name,data.email,db)
     active=getattr(u,'active_role',u.role)
@@ -300,8 +343,8 @@ def verifyotp(data:VerifyOtp,db:Session=Depends(get_db)):
     tok,u=verify_otp(data.phone,data.code,data.role,data.name,data.email,db);active=getattr(u,'active_role',u.role);return {'token':tok,'user':{'id':u.id,'name':u.name,'phone':u.phone,'email':u.email,'role':active}}
 def _hash_admin_password(password:str)->str:
     salt=secrets.token_bytes(16)
-    digest=hashlib.pbkdf2_hmac('sha256',password.encode(),salt,200000)
-    return f'pbkdf2_sha256$200000${salt.hex()}${digest.hex()}'
+    digest=hashlib.pbkdf2_hmac('sha256',password.encode(),salt,600000)
+    return f'pbkdf2_sha256$600000${salt.hex()}${digest.hex()}'
 
 def _verify_admin_password(password:str,stored:str)->bool:
     try:
@@ -313,8 +356,10 @@ def _verify_admin_password(password:str,stored:str)->bool:
         return False
 
 @app.post('/api/admin/login')
-def admin_login(data:AdminLogin,db:Session=Depends(get_db)):
+def admin_login(data:AdminLogin,request:Request,db:Session=Depends(get_db)):
     aid=data.admin_id.strip()
+    client_ip=request.client.host if request.client else 'unknown'
+    _rate_limit(f'admin-login:{client_ip}:{aid.lower()}',5,300)
     primary_id,primary_pw=admin_credentials()
     account=None
     if hmac.compare_digest(aid,primary_id) and hmac.compare_digest(data.password,primary_pw):
