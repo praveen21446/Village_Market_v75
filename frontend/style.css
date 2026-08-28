@@ -907,3 +907,33 @@ body[data-role="farmer"] #mainNav button[data-view="market"],
 body[data-role="farmer"] #mainNav button[data-view="cart"]{
   display:none!important;
 }
+
+/* v111: make the three role-specific navigation buttons fill the full phone row. */
+@media(max-width:700px){
+  #app>.appHeader #mainNav{
+    width:100%!important;
+    display:flex!important;
+    align-items:stretch!important;
+    justify-content:stretch!important;
+    gap:6px!important;
+  }
+  #app>.appHeader #mainNav button{
+    flex:1 1 0!important;
+    width:0!important;
+    max-width:none!important;
+    min-width:0!important;
+    padding:6px 4px!important;
+    text-align:center!important;
+  }
+  #app>.appHeader #mainNav .navText{
+    width:100%!important;
+    text-align:center!important;
+    font-size:11px!important;
+    line-height:1.05!important;
+  }
+}
+@media(max-width:390px){
+  #app>.appHeader #mainNav{gap:4px!important}
+  #app>.appHeader #mainNav .navText{font-size:10px!important}
+  #app>.appHeader #mainNav button{padding-left:2px!important;padding-right:2px!important}
+}
