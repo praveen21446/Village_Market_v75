@@ -12,9 +12,18 @@ from sqlalchemy.orm import Session
 from .auth import admin_credentials,canonical_role,create_verified_session,current_user,require_role,send_otp,verify_otp
 from .database import SessionLocal,get_db
 from .models import AdminAccount,Booking,Crop,Notification,OtpCode,Review,SavedAddress,Session as UserSession,SupportMessage,SupportTicket,User
-from .schemas import AddressSave,AdminCreate,AdminLogin,Approval,BookingCreate,CartCheckout,CropRemoval,Decision,NotificationMark,ReviewCreate,SendOtp,StatusUpdate,StockUpdate,VerifyOtp,DeliveryOtpVerify,SupportMessageCreate,SupportStatusUpdate,SupportTicketCreate,AdminCropEdit,AdminUserEdit,Msg91Login,RoleSwitch
+from .schemas import AddressSave,AdminCreate,AdminLogin,Approval,BookingCreate,CartCheckout,CropRemoval,Decision,NotificationMark,ReviewCreate,SendOtp,StatusUpdate,StockUpdate,VerifyOtp,DeliveryOtpVerify,SupportMessageCreate,SupportStatusUpdate,SupportTicketCreate,AdminCropEdit,AdminUserEdit,Msg91Login,RoleSwitch,ProfileUpdate
 ROOT=Path(__file__).resolve().parents[1];UPLOADS=ROOT/'uploads';UPLOADS.mkdir(exist_ok=True);FRONTEND=ROOT/'frontend'
 app=FastAPI(title='Village Market API',version='2.0')
+
+def _profile_complete(user:User)->bool:
+    name=(user.name or '').strip()
+    email=(user.email or '').strip()
+    return bool(name and email and not name.startswith('User '))
+
+def _public_user(user:User,active_role:str|None=None)->dict:
+    active=active_role or getattr(user,'active_role',user.role)
+    return {'id':user.id,'name':user.name,'phone':user.phone,'email':user.email,'role':active,'profile_complete':_profile_complete(user)}
 
 # Lightweight per-instance throttling. For multi-instance/high-scale deployment,
 # replace with a shared Redis-backed limiter.
@@ -346,7 +355,7 @@ async def msg91_login(data:Msg91Login,request:Request,db:Session=Depends(get_db)
     await _verify_msg91_token(data.access_token,data.phone)
     tok,u=create_verified_session(data.phone,data.role,data.name,data.email,db)
     active=getattr(u,'active_role',u.role)
-    return {'token':tok,'user':{'id':u.id,'name':u.name,'phone':u.phone,'email':u.email,'role':active}}
+    return {'token':tok,'user':_public_user(u,active)}
 
 @app.post('/api/auth/switch-role')
 def switch_role(data:RoleSwitch,authorization:str|None=Header(None),db:Session=Depends(get_db),user:User=Depends(current_user)):
@@ -361,7 +370,7 @@ def switch_role(data:RoleSwitch,authorization:str|None=Header(None),db:Session=D
     session.role=desired
     db.commit()
     user.active_role=desired
-    return {'ok':True,'user':{'id':user.id,'name':user.name,'phone':user.phone,'email':user.email,'role':desired}}
+    return {'ok':True,'user':_public_user(user,desired)}
 
 @app.post('/api/auth/send-otp')
 def sendotp(data:SendOtp,db:Session=Depends(get_db)):
@@ -372,7 +381,7 @@ def sendotp(data:SendOtp,db:Session=Depends(get_db)):
 def verifyotp(data:VerifyOtp,db:Session=Depends(get_db)):
     if os.getenv('APP_ENV','development').lower()=='production':
         raise HTTPException(410,'Demo OTP is disabled. Use MSG91 real OTP.')
-    tok,u=verify_otp(data.phone,data.code,data.role,data.name,data.email,db);active=getattr(u,'active_role',u.role);return {'token':tok,'user':{'id':u.id,'name':u.name,'phone':u.phone,'email':u.email,'role':active}}
+    tok,u=verify_otp(data.phone,data.code,data.role,data.name,data.email,db);active=getattr(u,'active_role',u.role);return {'token':tok,'user':_public_user(u,active)}
 def _hash_admin_password(password:str)->str:
     salt=secrets.token_bytes(16)
     digest=hashlib.pbkdf2_hmac('sha256',password.encode(),salt,600000)
@@ -442,7 +451,19 @@ def delete_admin(admin_account_id:int,db:Session=Depends(get_db),admin:User=Depe
 @app.get('/api/me')
 def me(user:User=Depends(current_user)):
     active=getattr(user,'active_role',user.role)
-    return {'id':user.id,'name':user.name,'email':user.email,'phone':user.phone,'role':active,'display_role':{'customer':'buyer','vendor':'farmer','superadmin':'admin'}.get(active,active)}
+    out=_public_user(user,active)
+    out['display_role']={'customer':'buyer','vendor':'farmer','superadmin':'admin'}.get(active,active)
+    return out
+
+@app.put('/api/profile')
+def update_profile(data:ProfileUpdate,db:Session=Depends(get_db),user:User=Depends(current_user)):
+    if user.role=='superadmin':
+        raise HTTPException(403,'Admin profile is managed separately')
+    name=data.name.strip();email=data.email.strip().lower()
+    user.name=name;user.email=email
+    db.commit();db.refresh(user)
+    active=getattr(user,'active_role',user.role)
+    return {'ok':True,'user':_public_user(user,active)}
 @app.get('/api/addresses')
 def saved_addresses(kind:str,db:Session=Depends(get_db),user:User=Depends(current_user)):
     if kind not in {'delivery','farm'}: raise HTTPException(400,'Invalid address type')

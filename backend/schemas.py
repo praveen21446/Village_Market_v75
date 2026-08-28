@@ -3,6 +3,10 @@ class SendOtp(BaseModel): phone:str=Field(pattern=r'^[0-9]{10}$')
 class VerifyOtp(BaseModel): phone:str=Field(pattern=r'^[0-9]{10}$');code:str=Field(pattern=r'^[0-9]{6}$');role:str=Field(pattern=r'^(buyer|farmer|customer|vendor)$');name:str|None=Field(default=None,max_length=100);email:str|None=None
 class Msg91Login(BaseModel): phone:str=Field(pattern=r'^[0-9]{10}$');access_token:str=Field(min_length=20,max_length=5000);role:str=Field(pattern=r'^(buyer|farmer|customer|vendor)$');name:str|None=Field(default=None,max_length=100);email:str|None=None
 class RoleSwitch(BaseModel): role:str=Field(pattern=r'^(buyer|farmer|customer|vendor)$')
+class ProfileUpdate(BaseModel):
+    name:str=Field(min_length=2,max_length=100)
+    email:str=Field(min_length=5,max_length=180,pattern=r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
+
 class AdminLogin(BaseModel): admin_id:str=Field(min_length=1,max_length=80);password:str=Field(min_length=1,max_length=128)
 class AdminCreate(BaseModel): admin_id:str=Field(min_length=3,max_length=80,pattern=r'^[A-Za-z0-9_.@-]+$');name:str=Field(min_length=2,max_length=100);password:str=Field(min_length=8,max_length=128)
 class BookingCreate(BaseModel): crop_id:int;quantity_kg:float=Field(ge=10);delivery_method:str=Field(pattern=r'^delivery$');delivery_address:str|None=None;delivery_latitude:str|None=None;delivery_longitude:str|None=None

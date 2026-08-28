@@ -937,3 +937,27 @@ body[data-role="farmer"] #mainNav button[data-view="cart"]{
   #app>.appHeader #mainNav .navText{font-size:10px!important}
   #app>.appHeader #mainNav button{padding-left:2px!important;padding-right:2px!important}
 }
+
+
+/* V112 profile setup and profile header button */
+.profileHeaderBtn{display:grid;place-items:center;font-size:19px;background:#fff;border:1px solid var(--line);color:#17331e}
+.profileHeaderBtn:hover{background:#f4f8f2}
+.profilePanel{max-width:760px;margin:0 auto}
+.profileForm{display:grid;grid-template-columns:1fr 1fr;gap:18px 20px}
+.profileForm>label{display:grid;gap:8px;font-weight:800;color:#17331e}
+.profileForm input{width:100%;min-height:52px;border:1px solid #ccd8c9;border-radius:12px;padding:0 14px;font:inherit;background:#fff}
+.profilePhoneField{grid-column:1/-1}
+.profilePhoneInput{display:flex;align-items:center;border:1px solid #ccd8c9;border-radius:12px;overflow:hidden;background:#f5f7f4}
+.profilePhoneInput>span{padding:0 12px;font-weight:900;border-right:1px solid #d7dfd5}
+.profilePhoneInput input{border:0!important;border-radius:0!important;background:#f5f7f4!important}
+.profilePhoneField small{font-weight:500;color:#657166}
+.profileActions{grid-column:1/-1;display:flex;justify-content:flex-end;gap:10px;margin-top:4px}
+.appHeader .profileHeaderBtn{order:1}
+.appHeader .notificationHeaderBtn{order:0}
+.appHeader .roleModeButtons{order:2}
+.appHeader .settingsWrap{order:3}
+@media(max-width:700px){
+  .profileForm{grid-template-columns:1fr;gap:14px}.profilePhoneField,.profileActions{grid-column:1}.profilePanel{padding:16px}.profileActions{display:grid;grid-template-columns:1fr 1fr}.profileActions .primary,.profileActions .secondaryBtn{width:100%}
+  #app>.appHeader .profileHeaderBtn{min-width:34px!important;width:34px!important;min-height:36px!important;height:36px!important;padding:0!important;font-size:15px!important}
+}
+@media(max-width:390px){#app>.appHeader .notificationHeaderBtn{display:none!important}.profileHeaderBtn{display:grid!important}}
