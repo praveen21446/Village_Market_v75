@@ -143,11 +143,18 @@ async function initMsg91(){
 }
 function setLoginStage(stage){
   loginStage=stage;
-  const phoneStep=$('#phoneStep'),otpBox=$('#otpBox'),roleStep=$('#roleStep'),btn=$('#loginButton');
-  if(phoneStep)phoneStep.hidden=stage!=='phone';
-  if(otpBox)otpBox.hidden=stage!=='otp';
+  const phoneStep=$('#phoneStep'),otpBox=$('#otpBox'),roleStep=$('#roleStep'),btn=$('#loginButton'),phoneInput=$('#phone'),otpInput=$('#otp');
+  // Phone number and OTP always stay on the same login page/card.
+  if(phoneStep)phoneStep.hidden=false;
+  if(otpBox)otpBox.hidden=false;
   if(roleStep)roleStep.hidden=stage!=='role';
+  if(phoneInput)phoneInput.disabled=stage!=='phone';
+  if(otpInput)otpInput.disabled=stage!=='otp';
   if(btn){btn.disabled=false;btn.textContent=stage==='phone'?t('Get OTP'):stage==='otp'?t('Verify OTP'):t('Continue')}
+  if(stage==='phone'){
+    if(otpInput)otpInput.value='';
+    const hint=$('#otpHint');if(hint)hint.textContent='';
+  }
   if(stage==='role'){
     const phone=$('#phone')?.value.trim()||'';
     const v=$('#verifiedPhoneText');if(v)v.textContent=phone?`+91 ${phone.slice(0,2)}******${phone.slice(-2)}`:'';
@@ -191,15 +198,29 @@ $('#loginForm').onsubmit=async e=>{
 };
 setLoginStage('phone');
 initMsg91();
-function updateHeaderControls(){if(!user)return;const label=$('#userLabel');if(label)label.textContent=`${user.name||t('User')} · ${role==='farmer'?t('Farmer'):t('Buyer')}`;const sw=$('#roleSwitchText');if(sw)sw.textContent=role==='buyer'?t('Switch to Farmer'):t('Switch to Buyer');const lang=$('#languageSelect');if(lang)lang.value=currentLang()}
+function updateHeaderControls(){if(!user)return;const label=$('#userLabel');if(label)label.textContent=`${user.name||t('User')} · ${role==='farmer'?t('Farmer'):t('Buyer')}`;const buyerBtn=$('#buyerModeBtn'),farmerBtn=$('#farmerModeBtn');if(buyerBtn){buyerBtn.classList.toggle('active',role==='buyer');buyerBtn.setAttribute('aria-pressed',role==='buyer'?'true':'false')}if(farmerBtn){farmerBtn.classList.toggle('active',role==='farmer');farmerBtn.setAttribute('aria-pressed',role==='farmer'?'true':'false')}const lang=$('#languageSelect');if(lang)lang.value=currentLang()}
 async function openApp(){role=user?.role==='vendor'?'farmer':'buyer';const defaultView=role==='buyer'?'market':'add';const login=$('#login'),app=$('#app');if(login)login.hidden=true;if(app)app.hidden=false;document.body.dataset.role=role;setNav();updateCart();updateHeaderControls();try{await show(defaultView)}finally{setLoginLoading(false,role)}loadNotifications();connectLive()}
 function updateCart(){const el=$('#cartCount');if(el)el.textContent=getCart().length}
 function setNav(){const farmer=role==='farmer';$$('#mainNav button').forEach(b=>{const v=b.dataset.view;b.style.display=(farmer&&['market','cart'].includes(v))||(!farmer&&['add','dashboard'].includes(v))?'none':'flex'})}
 function markNav(v){$$('#mainNav button').forEach(b=>b.classList.toggle('active',b.dataset.view===v||(v==='cartAddress'&&b.dataset.view==='cart')))}
 function closeSettingsMenu(){const menu=$('#settingsMenu'),btn=$('#settingsBtn');if(menu)menu.hidden=true;if(btn)btn.setAttribute('aria-expanded','false')}
-async function switchUserRole(){const btn=$('#roleSwitch');if(!btn||btn.disabled)return;const next=role==='buyer'?'farmer':'buyer';btn.disabled=true;closeSettingsMenu();try{const d=await api('/api/auth/switch-role',{method:'POST',body:{role:next}});user=d.user;role=next;document.body.dataset.role=role;setNav();updateHeaderControls();toast(next==='farmer'?t('Role changed to Farmer'):t('Role changed to Buyer'),'success');await show(next==='farmer'?'add':'market')}catch(e){toast(e.message,'error')}finally{btn.disabled=false}}
+async function openRoleMode(target){
+  if(!['buyer','farmer'].includes(target))return;
+  const buttons=[$('#buyerModeBtn'),$('#farmerModeBtn')].filter(Boolean);
+  if(buttons.some(b=>b.disabled))return;
+  buttons.forEach(b=>b.disabled=true);closeSettingsMenu();
+  try{
+    if(role!==target){
+      const d=await api('/api/auth/switch-role',{method:'POST',body:{role:target}});
+      user=d.user;role=target;document.body.dataset.role=role;setNav();updateHeaderControls();
+      toast(target==='farmer'?t('Role changed to Farmer'):t('Role changed to Buyer'),'success');
+    }
+    await show(target==='farmer'?'add':'market');
+  }catch(e){toast(e.message,'error')}finally{buttons.forEach(b=>b.disabled=false);updateHeaderControls()}
+}
 $('#logout').onclick=()=>{localStorage.removeItem('vm_token');location.reload()};
-$('#roleSwitch').onclick=switchUserRole;
+$('#buyerModeBtn').onclick=()=>openRoleMode('buyer');
+$('#farmerModeBtn').onclick=()=>openRoleMode('farmer');
 $('#settingsBtn').onclick=e=>{e.stopPropagation();const menu=$('#settingsMenu'),btn=$('#settingsBtn');if(!menu)return;menu.hidden=!menu.hidden;btn.setAttribute('aria-expanded',menu.hidden?'false':'true')};
 $('#settingsMenu').onclick=e=>e.stopPropagation();document.addEventListener('click',closeSettingsMenu);
 $$('#mainNav button').forEach(b=>b.onclick=()=>show(b.dataset.view));$('#notificationBtn').onclick=showNotifications;async function show(v){try{if(role==='buyer' && ['add','dashboard'].includes(v))v='market';if(role==='farmer' && ['market','cart'].includes(v))v='add';window.vmCurrentView=v;markNav(v);if(v==='market')return await market();if(v==='cart')return await cartView();if(v==='bookings')return await bookings();if(v==='add')return addCrop();if(v==='dashboard')return await dashboard();if(v==='support')return await liveSupport();if(v==='address')return addressView();if(v==='farmAddress')return farmAddressView();if(v==='cartAddress')return await cartAddressView()}catch(err){console.error(err);const c=$('#content');if(c)c.innerHTML=`<div class="panel empty errorState"><div class="emptyIcon">!</div><h2>We couldn’t load this page</h2><p>${esc(err?.message||'Check your connection and try again.')}</p><button class="primary" onclick="show('${role==='buyer'?'market':'add'}')">Try again</button></div>`}}
