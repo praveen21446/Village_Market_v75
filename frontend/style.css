@@ -897,3 +897,13 @@ button:disabled{opacity:.62;cursor:not-allowed}
   #cropDetailsForm.form label{font-size:10px!important}
   #cropDetailsForm.form input,#cropDetailsForm.form select,#cropDetailsForm.form textarea{padding:9px 8px!important;font-size:11px!important}
 }
+
+
+/* v110: role-specific navigation visibility on every screen size.
+   Buyer: Marketplace, Cart, Orders. Farmer: Orders, Add Crop, Dashboard. */
+body[data-role="buyer"] #mainNav button[data-view="add"],
+body[data-role="buyer"] #mainNav button[data-view="dashboard"],
+body[data-role="farmer"] #mainNav button[data-view="market"],
+body[data-role="farmer"] #mainNav button[data-view="cart"]{
+  display:none!important;
+}
