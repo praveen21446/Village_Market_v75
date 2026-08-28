@@ -5,14 +5,14 @@ import time
 import asyncio,base64,hashlib,hmac,httpx,json,os,secrets,shutil,smtplib
 from email.message import EmailMessage
 from datetime import datetime,timedelta
-from fastapi import Depends,FastAPI,File,Form,HTTPException,Request,UploadFile,WebSocket,WebSocketDisconnect
+from fastapi import Depends,FastAPI,File,Form,Header,HTTPException,Request,UploadFile,WebSocket,WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
-from .auth import admin_credentials,create_verified_session,current_user,require_role,send_otp,verify_otp
+from .auth import admin_credentials,canonical_role,create_verified_session,current_user,require_role,send_otp,verify_otp
 from .database import SessionLocal,get_db
 from .models import AdminAccount,Booking,Crop,Notification,OtpCode,Review,SavedAddress,Session as UserSession,SupportMessage,SupportTicket,User
-from .schemas import AddressSave,AdminCreate,AdminLogin,Approval,BookingCreate,CartCheckout,CropRemoval,Decision,NotificationMark,ReviewCreate,SendOtp,StatusUpdate,StockUpdate,VerifyOtp,DeliveryOtpVerify,SupportMessageCreate,SupportStatusUpdate,SupportTicketCreate,AdminCropEdit,AdminUserEdit,Msg91Login
+from .schemas import AddressSave,AdminCreate,AdminLogin,Approval,BookingCreate,CartCheckout,CropRemoval,Decision,NotificationMark,ReviewCreate,SendOtp,StatusUpdate,StockUpdate,VerifyOtp,DeliveryOtpVerify,SupportMessageCreate,SupportStatusUpdate,SupportTicketCreate,AdminCropEdit,AdminUserEdit,Msg91Login,RoleSwitch
 ROOT=Path(__file__).resolve().parents[1];UPLOADS=ROOT/'uploads';UPLOADS.mkdir(exist_ok=True);FRONTEND=ROOT/'frontend'
 app=FastAPI(title='Village Market API',version='2.0')
 
@@ -347,6 +347,21 @@ async def msg91_login(data:Msg91Login,request:Request,db:Session=Depends(get_db)
     tok,u=create_verified_session(data.phone,data.role,data.name,data.email,db)
     active=getattr(u,'active_role',u.role)
     return {'token':tok,'user':{'id':u.id,'name':u.name,'phone':u.phone,'email':u.email,'role':active}}
+
+@app.post('/api/auth/switch-role')
+def switch_role(data:RoleSwitch,authorization:str|None=Header(None),db:Session=Depends(get_db),user:User=Depends(current_user)):
+    if user.role=='superadmin':
+        raise HTTPException(403,'Admin account cannot switch into the customer app')
+    if not authorization or not authorization.startswith('Bearer '):
+        raise HTTPException(401,'Please sign in')
+    session=db.get(UserSession,authorization[7:])
+    if not session or session.user_id!=user.id:
+        raise HTTPException(401,'Session expired')
+    desired=canonical_role(data.role)
+    session.role=desired
+    db.commit()
+    user.active_role=desired
+    return {'ok':True,'user':{'id':user.id,'name':user.name,'phone':user.phone,'email':user.email,'role':desired}}
 
 @app.post('/api/auth/send-otp')
 def sendotp(data:SendOtp,db:Session=Depends(get_db)):

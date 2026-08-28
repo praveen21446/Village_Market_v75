@@ -15,7 +15,9 @@ def create_verified_session(phone,role,name,email,db):
     desired=canonical_role(role);user=db.query(User).filter(User.phone==phone).first()
     clean_name=(name or '').strip()
     if not user:
-        if not clean_name: raise HTTPException(400,'Name is required')
+        if not clean_name:
+            digits=''.join(ch for ch in str(phone) if ch.isdigit())
+            clean_name=f'User {digits[-4:]}' if digits else 'Village Market User'
         user=User(phone=phone,role=desired,name=clean_name,email=email or None,verified=True);db.add(user);db.flush()
     else:
         if user.role=='superadmin': raise HTTPException(403,'Admin account cannot be used in the customer app')

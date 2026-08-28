@@ -1,5 +1,5 @@
-const CACHE='village-market-v104-aqua-breeds-fixed';
-const SHELL=['/','/static/style.css?v=88','/static/app.js?v=104','/static/offline.html','/static/icon-192.png','/static/icon-512.png','/static/apple-touch-icon.png','/static/favicon.png'];
+const CACHE='village-market-v105-login-role-settings';
+const SHELL=['/','/static/style.css?v=105','/static/app.js?v=105','/static/offline.html','/static/icon-192.png','/static/icon-512.png','/static/apple-touch-icon.png','/static/favicon.png'];
 self.addEventListener('install',event=>{event.waitUntil(caches.open(CACHE).then(c=>c.addAll(SHELL)).then(()=>self.skipWaiting()));});
 self.addEventListener('activate',event=>{event.waitUntil(caches.keys().then(keys=>Promise.all(keys.filter(k=>k!==CACHE).map(k=>caches.delete(k)))).then(()=>self.clients.claim()));});
 self.addEventListener('fetch',event=>{
