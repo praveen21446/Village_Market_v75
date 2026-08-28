@@ -233,7 +233,7 @@ def delete_crop_photos(crop):
     crop.photos_json='[]'
 
 def crop_private(c,db):
-    f=db.get(User,c.farmer_id);photos=crop_photos(c);return {'id':c.id,'name':c.name,'category':c.category,'quantity_kg':c.quantity_kg,'available_kg':c.available_kg,'location':c.location,'address_line':c.address_line,'village':c.village,'mandal':c.mandal,'district':c.district,'state':c.state,'pincode':c.pincode,'landmark':c.landmark,'latitude':c.latitude,'longitude':c.longitude,'expected_price':c.expected_price,'quality':c.quality,'harvest_date':c.harvest_date,'details':c.details,'photo':photos[0] if photos else None,'photos':photos,'status':c.status,'market_price':c.market_price,'admin_note':c.admin_note,'farmer_id':c.farmer_id,'farmer_name':f.name if f else 'Farmer','farmer_phone':f.phone if f else ''}
+    f=db.get(User,c.farmer_id);photos=crop_photos(c);return {'id':c.id,'name':c.name,'category':c.category,'breed':c.breed or '','quantity_kg':c.quantity_kg,'available_kg':c.available_kg,'location':c.location,'address_line':c.address_line,'village':c.village,'mandal':c.mandal,'district':c.district,'state':c.state,'pincode':c.pincode,'landmark':c.landmark,'latitude':c.latitude,'longitude':c.longitude,'expected_price':c.expected_price,'quality':c.quality,'harvest_date':c.harvest_date,'details':c.details,'photo':photos[0] if photos else None,'photos':photos,'status':c.status,'market_price':c.market_price,'admin_note':c.admin_note,'farmer_id':c.farmer_id,'farmer_name':f.name if f else 'Farmer','farmer_phone':f.phone if f else ''}
 def crop_public(c,db):
     d=crop_private(c,db)
     for k in ['location','address_line','village','mandal','district','state','pincode','landmark','latitude','longitude','expected_price','admin_note','farmer_id','farmer_name','farmer_phone']:d.pop(k,None)
@@ -448,7 +448,7 @@ def cats(db:Session=Depends(get_db)):return sorted({c.category for c in db.query
 @app.get('/api/crops')
 def crops(q:str='',category:str='all',min_price:float|None=None,max_price:float|None=None,sort:str='newest',db:Session=Depends(get_db)):
     rows=db.query(Crop).filter(Crop.status=='approved',Crop.available_kg>=10,Crop.market_price>0).all()
-    if q:rows=[c for c in rows if q.lower() in f'{c.name} {c.category} {c.quality}'.lower()]
+    if q:rows=[c for c in rows if q.lower() in f'{c.name} {c.category} {c.breed or ""} {c.quality}'.lower()]
     if category!='all':rows=[c for c in rows if c.category.lower()==category.lower()]
     if min_price is not None:rows=[c for c in rows if c.market_price>=min_price]
     if max_price is not None:rows=[c for c in rows if c.market_price<=max_price]
@@ -460,10 +460,21 @@ def crop_detail(crop_id:int,db:Session=Depends(get_db)):
     if not c or c.status!='approved' or c.available_kg<10 or not c.market_price or c.market_price<=0:raise HTTPException(404,'Crop not found')
     return crop_public(c,db)
 @app.post('/api/crops')
-def add_crop(name:str=Form(...),category:str=Form(...),quantity_kg:float=Form(...),location:str=Form(...),address_line:str=Form(''),village:str=Form(''),mandal:str=Form(''),district:str=Form(''),state:str=Form(''),pincode:str=Form(''),landmark:str=Form(''),latitude:str=Form(''),longitude:str=Form(''),expected_price:float=Form(...),quality:str=Form(...),harvest_date:str=Form(...),details:str=Form(''),photos:list[UploadFile]|None=File(None),photo:UploadFile|None=File(None),db:Session=Depends(get_db),farmer:User=Depends(require_role('vendor'))):
+def add_crop(name:str=Form(...),category:str=Form(...),breed:str=Form(''),quantity_kg:float=Form(...),location:str=Form(...),address_line:str=Form(''),village:str=Form(''),mandal:str=Form(''),district:str=Form(''),state:str=Form(''),pincode:str=Form(''),landmark:str=Form(''),latitude:str=Form(''),longitude:str=Form(''),expected_price:float=Form(...),quality:str=Form(...),harvest_date:str=Form(...),details:str=Form(''),photos:list[UploadFile]|None=File(None),photo:UploadFile|None=File(None),db:Session=Depends(get_db),farmer:User=Depends(require_role('vendor'))):
     required_text={'name':name,'category':category,'quality':quality,'harvest_date':harvest_date}
     missing=[label for label,value in required_text.items() if not str(value).strip()]
     if missing:raise HTTPException(400,f"Required crop fields missing: {', '.join(missing)}")
+    category=category.strip();name=name.strip();breed=breed.strip()
+    aqua_breeds={
+        'Fish':{'Rohu','Catla','Mrigal','Tilapia','Pangasius','Common Carp','Grass Carp','Silver Carp','Murrel / Snakehead'},
+        'Prawns':{'Vannamei / Pacific White Shrimp','Black Tiger Prawn','Indian White Prawn','Giant Freshwater Prawn / Scampi'}
+    }
+    if category.lower()=='aqua':
+        if name not in aqua_breeds:raise HTTPException(400,'For Aqua category, crop name must be Fish or Prawns')
+        if not breed:raise HTTPException(400,'Breed is required for Aqua listings')
+        if breed not in aqua_breeds[name]:raise HTTPException(400,f'Invalid breed selected for {name}')
+    else:
+        breed=''
     if quantity_kg<10 or expected_price<=0:raise HTTPException(400,'Quantity must be at least 10 kg and price must be positive')
     files=[f for f in (photos or []) if f and f.filename]
     if photo and photo.filename: files.insert(0,photo)
@@ -471,7 +482,7 @@ def add_crop(name:str=Form(...),category:str=Form(...),quantity_kg:float=Form(..
     max_photos=max(1,int(os.getenv('MAX_CROP_PHOTOS','8')))
     if len(files)>max_photos:raise HTTPException(400,f'You can upload a maximum of {max_photos} crop photos')
     uploaded=[upload(f,farmer.id) for f in files]
-    c=Crop(farmer_id=farmer.id,name=name,category=category,quantity_kg=quantity_kg,available_kg=quantity_kg,location=location,address_line=address_line,village=village,mandal=mandal,district=district,state=state,pincode=pincode,landmark=landmark,latitude=latitude,longitude=longitude,expected_price=expected_price,quality=quality,harvest_date=harvest_date,details=details,photo=uploaded[0],photos_json=json.dumps(uploaded));db.add(c);db.flush();notify_admins(db,'New crop submitted',f'Crop {c.name} is waiting for inspection.');db.commit();emit({'type':'crop_submitted','crop_id':c.id});return crop_private(c,db)
+    c=Crop(farmer_id=farmer.id,name=name,category=category,breed=breed,quantity_kg=quantity_kg,available_kg=quantity_kg,location=location,address_line=address_line,village=village,mandal=mandal,district=district,state=state,pincode=pincode,landmark=landmark,latitude=latitude,longitude=longitude,expected_price=expected_price,quality=quality,harvest_date=harvest_date,details=details,photo=uploaded[0],photos_json=json.dumps(uploaded));db.add(c);db.flush();notify_admins(db,'New crop submitted',f'Crop {c.name} is waiting for inspection.');db.commit();emit({'type':'crop_submitted','crop_id':c.id});return crop_private(c,db)
 @app.get('/api/farmer/crops')
 def fcrops(db:Session=Depends(get_db),farmer:User=Depends(require_role('vendor'))):return [crop_private(c,db) for c in db.query(Crop).filter(Crop.farmer_id==farmer.id).order_by(Crop.id.desc()).all()]
 @app.patch('/api/farmer/crops/{crop_id}/stock')
@@ -658,7 +669,7 @@ def edit_published_crop(crop_id:int,data:AdminCropEdit,db:Session=Depends(get_db
     c=db.get(Crop,crop_id)
     if not c: raise HTTPException(404,'Crop not found')
     if c.status!='approved': raise HTTPException(400,'Only a published crop can be edited here')
-    c.name=data.name.strip();c.category=data.category.strip();c.quality=data.quality.strip();c.harvest_date=data.harvest_date.strip();c.details=data.details.strip()
+    c.name=data.name.strip();c.category=data.category.strip();c.breed=data.breed.strip();c.quality=data.quality.strip();c.harvest_date=data.harvest_date.strip();c.details=data.details.strip()
     c.available_kg=round(data.available_kg,2);c.quantity_kg=max(c.quantity_kg,c.available_kg);c.market_price=round(data.market_price,2)
     c.admin_note=data.admin_note.strip() or f'Market details updated by admin on {datetime.utcnow().date().isoformat()}.'
     notify(db,c.farmer_id,'Crop details updated',f'{c.name} marketplace details were updated by admin. Current price: ₹{c.market_price:g}/kg.')

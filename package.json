@@ -1,0 +1,29 @@
+{
+  "name": "village_market_v75",
+  "version": "1.0.0",
+  "description": "Village Market is a lightweight, full-stack e-commerce web application built as an MVP for local marketplaces. It follows a decoupled monolithic architecture with a Python REST API backend and a lightweight vanilla JavaScript client-side single-page application (SPA).",
+  "main": "index.js",
+  "directories": {
+    "test": "tests"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/praveen21446/Village_Market_v75.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/praveen21446/Village_Market_v75/issues"
+  },
+  "homepage": "https://github.com/praveen21446/Village_Market_v75#readme",
+  "dependencies": {
+    "@capacitor/android": "^8.5.0",
+    "@capacitor/cli": "^8.5.0",
+    "@capacitor/core": "^8.5.0"
+  }
+}

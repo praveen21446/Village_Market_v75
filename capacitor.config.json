@@ -1,0 +1,9 @@
+{
+  "appId": "com.villagemarket.app",
+  "appName": "Village Market",
+  "webDir": "frontend",
+  "server": {
+    "url": "https://villagemarketv75-production.up.railway.app",
+    "cleartext": false
+  }
+}

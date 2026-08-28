@@ -36,6 +36,7 @@ class SupportStatusUpdate(BaseModel):
 class AdminCropEdit(BaseModel):
     name:str=Field(min_length=2,max_length=100)
     category:str=Field(min_length=2,max_length=40)
+    breed:str=Field(default='',max_length=120)
     available_kg:float=Field(ge=0)
     quality:str=Field(min_length=1,max_length=50)
     harvest_date:str=Field(min_length=4,max_length=20)
